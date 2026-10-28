@@ -3,9 +3,8 @@
 import json
 import os
 import re
-import time
-from urllib.parse import urljoin, urlparse
-import requests
+from urllib.parse import urljoin
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 
 LIST_FILE = "manhwa_list.json"
@@ -13,13 +12,9 @@ NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-TIMEOUT = 20
+TIMEOUT = 25
 
 HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
 }
@@ -58,7 +53,7 @@ def notify(title: str, message: str, link: str = "") -> bool:
         try:
             r = requests.post(NTFY_SERVER, json=payload, timeout=15)
             ok = ok or r.ok
-        except requests.RequestException:
+        except Exception:
             pass
 
     if TG_TOKEN and TG_CHAT_ID:
@@ -72,12 +67,12 @@ def notify(title: str, message: str, link: str = "") -> bool:
                 timeout=15,
             )
             ok = ok or r.ok
-        except requests.RequestException:
+        except Exception:
             pass
     return ok
 
 def get_latest(url: str, selector: str = "", include_paid: bool = False):
-    resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+    resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
