@@ -29,5 +29,12 @@
     "selector": "",
     "include_paid": false,
     "last_chapter": ""
+  },
+  {
+    "title": "Space Marine",
+    "url": "https://vortexscans.org/series/a-space-marine-got-a-status-window",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
