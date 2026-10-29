@@ -3,9 +3,17 @@
 import json
 import os
 import re
+import unicodedata
 from urllib.parse import urljoin, urlparse
 from curl_cffi import requests
 from bs4 import BeautifulSoup
+
+try:
+    import warnings
+    from bs4 import XMLParsedAsHTMLWarning
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+except ImportError:
+    pass
 
 LIST_FILE = "manhwa_list.json"
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
@@ -16,13 +24,14 @@ TIMEOUT = 25
 
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
 }
 
 CHAPTER_RE = re.compile(r"(?<![a-z])(?:chapter|chap|ch|episode|ep)[\s\-_.:#/]*(\d{1,5}(?:\.\d+)?)(?!\d)", re.I)
-JP_RE = re.compile(r"第\s*(\d+)\s*話(?:\s*その\s*(\d+))?")
-JSON_JP_RE = re.compile(r'"title"\s*:\s*"第\s*(\d+)\s*話(?:\s*その\s*(\d+))?')
-RSS_N_RE = re.compile(r"(\d+(?:\.\d+)?)\s*話")
+# پشتیبانی از شماره‌های ژاپنی مثل 第145話، 第98.5話، 第44話その2، [150話]
+JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part)?\s*(\d+))?", re.I)
+RSS_N_RE = re.compile(r"(?:^|[\[\(【\s])(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート)?\s*(\d+))?")
+CW_JSON_RE = re.compile(r'"(?:title|episodeTitle|subTitle|name)"\s*:\s*"[^"]*?第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その)?\s*(\d+))?')
 KEY_RE = re.compile(r"\s*(\d+(?:\.\d+)?)(?:\s*その\s*(\d+))?")
 RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular", re.I)
 PAID_RE = re.compile(r"\b(?:lock(?:ed)?|coins?|premium|paywall)\b|lucide-lock|fa-lock|🔒|🪙", re.I)
@@ -33,8 +42,19 @@ LOCKED_RE = re.compile(
     r"|cost to unlock|sign in to unlock|unlock this (?:exciting )?chapter", re.I
 )
 
+def norm(s: str) -> str:
+    """تبدیل اعداد و حروف تمام‌عرض ژاپنی (مثل １２３) به استاندارد (123)"""
+    return unicodedata.normalize("NFKC", str(s or ""))
+
+def _jp(m):
+    num_str = m.group(1)
+    n = float(num_str)
+    sub = int(m.group(2) or 0)
+    base = str(int(n)) if n.is_integer() else num_str
+    return (n, sub), (f"{base} その{sub}" if sub else base)
+
 def chap_key(s):
-    m = KEY_RE.match(str(s or ""))
+    m = KEY_RE.match(norm(s))
     return (float(m.group(1)), int(m.group(2) or 0)) if m else None
 
 def _paid_text(x) -> bool:
@@ -43,7 +63,7 @@ def _paid_text(x) -> bool:
 def _chap_anchor(x) -> bool:
     if getattr(x, "name", None) != "a":
         return False
-    text = x.get_text(" ", strip=True) + " " + (x.get("href") or "")
+    text = norm(x.get_text(" ", strip=True) + " " + (x.get("href") or ""))
     return bool(CHAPTER_RE.search(text) or JP_RE.search(text))
 
 def is_paid(tag) -> bool:
@@ -87,7 +107,6 @@ def chapter_locked(chap_url: str):
         return None
 
 def heancms_latest(url: str, free_only: bool = True):
-    """مخصوص سایت‌های HeanCMS مثل OmegaScans"""
     p = urlparse(url)
     m = re.fullmatch(r"/(?:series|comic)/([^/]+)/?", p.path)
     if not m:
@@ -138,8 +157,36 @@ def heancms_latest(url: str, free_only: bool = True):
         print(f"HeanCMS API info ({p.netloc}): {e}")
     return None
 
+def parse_rss_items(soup, base_url: str):
+    """استخراج چپتر و لینک از فیدهای RSS/Atom (مثل ShonenJumpPlus و GigaViewer)"""
+    cands = []
+    for item in soup.find_all(["item", "entry"]):
+        title_tag = item.find("title")
+        if not title_tag:
+            continue
+        text = norm(title_tag.get_text(" ", strip=True))
+        link = ""
+        link_tag = item.find("link")
+        if link_tag:
+            link = (link_tag.get("href") or link_tag.get_text(strip=True) or "").strip()
+            if not link and link_tag.next_sibling and isinstance(link_tag.next_sibling, str):
+                link = link_tag.next_sibling.strip()
+        if not link:
+            guid = item.find("guid")
+            if guid and guid.get_text(strip=True).startswith("http"):
+                link = guid.get_text(strip=True)
+
+        m = JP_RE.search(text) or RSS_N_RE.search(text)
+        if m:
+            key, label = _jp(m)
+            cands.append((key, label, link or base_url, False))
+            continue
+        m = CHAPTER_RE.search(text)
+        if m:
+            cands.append(((float(m.group(1)), 0), m.group(1), link or base_url, False))
+    return cands
+
 def embedded_chapters(raw: str, free_only: bool):
-    """مخصوص سایت‌های Next.js که دیتا داخل اسکریپت‌های صفحه است"""
     text = raw.replace('\\"', '"')
     clusters, cur, last_end = [], {}, None
     for m in EMB_RE.finditer(text):
@@ -203,24 +250,44 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         if hc:
             return hc[0], hc[1]
 
-    # ۲. دریافت صفحه HTML با شبیه‌ساز کروم
+    # ۲. دریافت صفحه یا فید RSS
     resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
     resp.raise_for_status()
-    raw = resp.text
+    raw = norm(resp.text)
     soup = BeautifulSoup(raw, "html.parser")
 
     if selector.strip():
         el = soup.select_one(selector)
         if not el:
             raise ValueError("Selector پیدا نشد")
-        m = re.search(r"\d+(?:\.\d+)?", el.get_text(" ", strip=True))
+        m = re.search(r"\d+(?:\.\d+)?", norm(el.get_text(" ", strip=True)))
         if not m:
             raise ValueError("عددی در متن نبود")
         a = el if el.name == "a" else (el.find("a") or el.find_parent("a"))
         href = a.get("href", "") if a else ""
         return m.group(0), (urljoin(url, href) if href else url)
 
-    # ۳. فیلتر کردن لینک‌های خود اثر و حذف بخش Recommended/Related
+    # ۳. اگر خود لینک یک فید RSS/Atom است (مثل shonenjumpplus.com/rss/series/...)
+    rss_cands = parse_rss_items(soup, url)
+    if rss_cands:
+        best = max(rss_cands, key=lambda x: x[0])
+        return best[1], best[2]
+
+    # ۴. اگر صفحه لینک به فید RSS مخصوص اثر دارد (سایت‌های ژاپنی GigaViewer)
+    for a in soup.select('a[href*="/rss/series/"], link[type*="rss"], link[type*="atom"]'):
+        feed_href = a.get("href")
+        if feed_href:
+            try:
+                rf = requests.get(urljoin(url, feed_href), headers=HEADERS, impersonate="chrome124", timeout=15)
+                if rf.status_code == 200:
+                    fc = parse_rss_items(BeautifulSoup(norm(rf.text), "html.parser"), url)
+                    if fc:
+                        best = max(fc, key=lambda x: x[0])
+                        return best[1], best[2]
+            except Exception:
+                pass
+
+    # ۵. بررسی لینک‌های HTML صفحه
     anchors = soup.find_all("a")
     paths = [urlparse(resp.url).path.rstrip("/"), urlparse(url).path.rstrip("/")]
     paths = [p for p in dict.fromkeys(paths) if len(p) > 1]
@@ -247,27 +314,36 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     cands = []
     for a in anchors:
         href = a.get("href", "") or ""
-        for text in (a.get_text(" ", strip=True), href):
+        for text in (norm(a.get_text(" ", strip=True)), href):
             m = JP_RE.search(text or "")
             if m:
-                n, sub = int(m.group(1)), int(m.group(2) or 0)
-                label = f"{n} その{sub}" if m.group(2) else str(n)
-                cands.append(((float(n), sub), label, href, is_paid(a)))
+                key, label = _jp(m)
+                cands.append((key, label, href, is_paid(a)))
                 break
             m = CHAPTER_RE.search(text or "")
             if m:
                 cands.append(((float(m.group(1)), 0), m.group(1), href, is_paid(a)))
                 break
 
+    # ۶. همیشه داده‌های JSON داخل صفحه (مثل Comic-Walker / Next.js) را هم بررسی کن
+    # چون Comic-Walker در تگ‌های <a> فقط ۳ چپتر اول را می‌گذارد اما در JSON آخرین چپتر هست!
+    if not own_found:
+        for m in CW_JSON_RE.finditer(raw):
+            key, label = _jp(m)
+            cands.append((key, label, "", False))
+        for m in JP_RE.finditer(raw):
+            key, label = _jp(m)
+            cands.append((key, label, "", False))
+
     if free_only and any(not c[3] for c in cands):
         cands = [c for c in cands if not c[3]]
 
-    # بررسی قفل بودن از داخل صفحه چپتر (برای سایت‌هایی مثل VortexScans)
     if free_only and cands:
         ordered = sorted(cands, key=lambda c: c[0], reverse=True)
         keep = None
         for c in ordered[:3]:
             if not c[2]:
+                keep = c
                 break
             if chapter_locked(urljoin(url, c[2])) is not True:
                 keep = c
@@ -275,15 +351,10 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         if keep is not None and keep is not ordered[0]:
             cands = [c for c in cands if c[0] <= keep[0]]
 
-    # ۴. بررسی داده‌های JSON داخل صفحه (Next.js) اگر لینکی نبود
     if not cands and not own_found:
         emb = embedded_chapters(raw, free_only)
         if emb:
             return emb, url
-        for m in JSON_JP_RE.finditer(raw):
-            n, sub = int(m.group(1)), int(m.group(2) or 0)
-            label = f"{n} その{sub}" if m.group(2) else str(n)
-            cands.append(((float(n), sub), label, "", False))
 
     if not cands:
         raise ValueError("چپتری پیدا نشد")
