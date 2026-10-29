@@ -28,10 +28,8 @@ HEADERS = {
 }
 
 CHAPTER_RE = re.compile(r"(?<![a-z])(?:chapter|chap|ch|episode|ep)[\s\-_.:#/]*(\d{1,5}(?:\.\d+)?)(?!\d)", re.I)
-# پشتیبانی از شماره‌های ژاپنی مثل 第145話، 第98.5話، 第44話その2، [150話]
-JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part)?\s*(\d+))?", re.I)
+JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part|\.|[-_])?\s*(\d+))?", re.I)
 RSS_N_RE = re.compile(r"(?:^|[\[\(【\s])(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート)?\s*(\d+))?")
-CW_JSON_RE = re.compile(r'"(?:title|episodeTitle|subTitle|name)"\s*:\s*"[^"]*?第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その)?\s*(\d+))?')
 KEY_RE = re.compile(r"\s*(\d+(?:\.\d+)?)(?:\s*その\s*(\d+))?")
 RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular", re.I)
 PAID_RE = re.compile(r"\b(?:lock(?:ed)?|coins?|premium|paywall)\b|lucide-lock|fa-lock|🔒|🪙", re.I)
@@ -43,7 +41,6 @@ LOCKED_RE = re.compile(
 )
 
 def norm(s: str) -> str:
-    """تبدیل اعداد و حروف تمام‌عرض ژاپنی (مثل １２３) به استاندارد (123)"""
     return unicodedata.normalize("NFKC", str(s or ""))
 
 def _jp(m):
@@ -106,6 +103,67 @@ def chapter_locked(chap_url: str):
     except Exception:
         return None
 
+def comic_walker_latest(url: str):
+    """مخصوص سایت ژاپنی Comic-Walker (KadoComi)"""
+    if "comic-walker.com" not in url:
+        return None
+    m_code = re.search(r"(KC_\d+_S)", url)
+    if not m_code:
+        return None
+    work_code = m_code.group(1)
+    detail_url = f"https://comic-walker.com/detail/{work_code}"
+
+    # ۱. امتحان کردن API رسمی KadoComi
+    try:
+        api_url = f"https://comic-walker.com/api/contents/details/episode?workCode={work_code}&episodeType=latest"
+        r_api = requests.get(api_url, headers={**HEADERS, "Accept": "application/json"}, impersonate="chrome124", timeout=15)
+        if r_api.status_code == 200 and "json" in (r_api.headers.get("content-type") or ""):
+            raw_api = norm(r_api.text)
+            cands = []
+            for m in JP_RE.finditer(raw_api):
+                key, label = _jp(m)
+                cands.append((key, label))
+            if cands:
+                best = max(cands, key=lambda x: x[0])
+                return best[1], detail_url
+    except Exception:
+        pass
+
+    # ۲. استخراج از __NEXT_DATA__ در صفحه اصلی اثر
+    try:
+        r = requests.get(detail_url, headers=HEADERS, impersonate="chrome124", timeout=20)
+        if r.status_code != 200:
+            return None
+        raw = norm(r.text)
+        soup = BeautifulSoup(raw, "html.parser")
+        cands = []
+
+        next_tag = soup.find("script", id="__NEXT_DATA__")
+        search_text = norm(next_tag.string) if (next_tag and next_tag.string) else raw
+
+        # جستجوی تمام عناوین اپیزودها در JSON
+        for m in JP_RE.finditer(search_text):
+            key, label = _jp(m)
+            cands.append((key, label, detail_url))
+
+        # استخراج از کدهای اپیزود مثل KC_0044700008400021_E (که 00084 شماره چپتر است)
+        prefix = work_code[:-2]  # KC_004470
+        for m_ep in re.finditer(rf"({prefix}(\d{{5}})(\d{{3}})\d{{2}}_E)", search_text):
+            ep_code = m_ep.group(1)
+            ch_num = int(m_ep.group(2))
+            sub_num = int(m_ep.group(3))
+            if 0 < ch_num < 2000:
+                label = f"{ch_num} その{sub_num}" if sub_num > 0 else str(ch_num)
+                ep_link = f"https://comic-walker.com/detail/{work_code}/episodes/{ep_code}?episodeType=latest"
+                cands.append(((float(ch_num), sub_num), label, ep_link))
+
+        if cands:
+            best = max(cands, key=lambda x: x[0])
+            return best[1], best[2]
+    except Exception as e:
+        print(f"Comic-Walker error: {e}")
+    return None
+
 def heancms_latest(url: str, free_only: bool = True):
     p = urlparse(url)
     m = re.fullmatch(r"/(?:series|comic)/([^/]+)/?", p.path)
@@ -158,7 +216,6 @@ def heancms_latest(url: str, free_only: bool = True):
     return None
 
 def parse_rss_items(soup, base_url: str):
-    """استخراج چپتر و لینک از فیدهای RSS/Atom (مثل ShonenJumpPlus و GigaViewer)"""
     cands = []
     for item in soup.find_all(["item", "entry"]):
         title_tag = item.find("title")
@@ -244,13 +301,18 @@ def notify(title: str, message: str, link: str = "") -> bool:
 def get_latest(url: str, selector: str = "", include_paid: bool = False):
     free_only = not include_paid
 
-    # ۱. امتحان کردن API سایت‌های HeanCMS (مثل OmegaScans)
     if not selector.strip():
+        # ۱. بررسی اختصاصی Comic-Walker
+        cw = comic_walker_latest(url)
+        if cw:
+            return cw[0], cw[1]
+
+        # ۲. بررسی اختصاصی سایت‌های HeanCMS (مثل OmegaScans)
         hc = heancms_latest(url, free_only=free_only)
         if hc:
             return hc[0], hc[1]
 
-    # ۲. دریافت صفحه یا فید RSS
+    # ۳. دریافت صفحه یا فید RSS
     resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
     resp.raise_for_status()
     raw = norm(resp.text)
@@ -267,13 +329,13 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         href = a.get("href", "") if a else ""
         return m.group(0), (urljoin(url, href) if href else url)
 
-    # ۳. اگر خود لینک یک فید RSS/Atom است (مثل shonenjumpplus.com/rss/series/...)
+    # ۴. اگر خود لینک یک فید RSS/Atom است
     rss_cands = parse_rss_items(soup, url)
     if rss_cands:
         best = max(rss_cands, key=lambda x: x[0])
         return best[1], best[2]
 
-    # ۴. اگر صفحه لینک به فید RSS مخصوص اثر دارد (سایت‌های ژاپنی GigaViewer)
+    # ۵. اگر صفحه لینک به فید RSS مخصوص اثر دارد
     for a in soup.select('a[href*="/rss/series/"], link[type*="rss"], link[type*="atom"]'):
         feed_href = a.get("href")
         if feed_href:
@@ -287,7 +349,7 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             except Exception:
                 pass
 
-    # ۵. بررسی لینک‌های HTML صفحه
+    # ۶. بررسی لینک‌های HTML صفحه
     anchors = soup.find_all("a")
     paths = [urlparse(resp.url).path.rstrip("/"), urlparse(url).path.rstrip("/")]
     paths = [p for p in dict.fromkeys(paths) if len(p) > 1]
@@ -324,16 +386,6 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             if m:
                 cands.append(((float(m.group(1)), 0), m.group(1), href, is_paid(a)))
                 break
-
-    # ۶. همیشه داده‌های JSON داخل صفحه (مثل Comic-Walker / Next.js) را هم بررسی کن
-    # چون Comic-Walker در تگ‌های <a> فقط ۳ چپتر اول را می‌گذارد اما در JSON آخرین چپتر هست!
-    if not own_found:
-        for m in CW_JSON_RE.finditer(raw):
-            key, label = _jp(m)
-            cands.append((key, label, "", False))
-        for m in JP_RE.finditer(raw):
-            key, label = _jp(m)
-            cands.append((key, label, "", False))
 
     if free_only and any(not c[3] for c in cands):
         cands = [c for c in cands if not c[3]]
