@@ -52,13 +52,15 @@
     "url": "https://vortexscans.org/series/heroes-never-rest",
     "selector": "",
     "include_paid": false,
-    "last_chapter": ""
+    "last_chapter": "12",
+    "last_link": "https://vortexscans.org/series/heroes-never-rest/chapter-12"
   },
   {
     "title": "Howling",
     "url": "https://en-thunderscans.com/comics/howling",
     "selector": "",
     "include_paid": false,
-    "last_chapter": ""
+    "last_chapter": "8",
+    "last_link": "https://en-thunderscans.com/howling-chapter-8/"
   }
 ]
