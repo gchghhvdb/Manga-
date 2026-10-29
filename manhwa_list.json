@@ -53,5 +53,12 @@
     "selector": "",
     "include_paid": false,
     "last_chapter": ""
+  },
+  {
+    "title": "Howling",
+    "url": "https://en-thunderscans.com/comics/howling",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
