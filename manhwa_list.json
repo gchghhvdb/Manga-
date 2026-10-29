@@ -149,5 +149,12 @@
     "selector": "",
     "include_paid": false,
     "last_chapter": ""
+  },
+  {
+    "title": "Shepherd wizard",
+    "url": "https://vortexscans.org/series/the-shepherd-wizard",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
