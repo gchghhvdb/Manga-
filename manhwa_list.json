@@ -156,5 +156,12 @@
     "selector": "",
     "include_paid": false,
     "last_chapter": ""
+  },
+  {
+    "title": "guide2",
+    "url": "https://valirscans.org/series/comic/the-guide",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
