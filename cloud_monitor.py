@@ -16,6 +16,7 @@ except ImportError:
     pass
 
 LIST_FILE = "manhwa_list.json"
+SUBS_FILE = "subscribers.json"
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
@@ -31,7 +32,7 @@ CHAPTER_RE = re.compile(r"(?<![a-z])(?:chapter|chap|ch|episode|ep)[\s\-_.:#/]*(\
 JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part|\.|[-_])?\s*(\d+))?", re.I)
 RSS_N_RE = re.compile(r"(?:^|[\[\(【\s])(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート)?\s*(\d+))?")
 KEY_RE = re.compile(r"\s*(\d+(?:\.\d+)?)(?:\s*その\s*(\d+))?")
-RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular", re.I)
+RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular|weekly|monthly", re.I)
 PAID_RE = re.compile(r"\b(?:lock(?:ed)?|coins?|premium|paywall)\b|lucide-lock|fa-lock|🔒|🪙", re.I)
 OPEN_RE = re.compile(r"[\w-]*(?:unlock|lock[\w-]*open)[\w-]*", re.I)
 EMB_RE = re.compile(r"\{[^{}]*?chapter_(?:name|slug)[^{}]*\}")
@@ -103,8 +104,85 @@ def chapter_locked(chap_url: str):
     except Exception:
         return None
 
+def sync_telegram_subscribers() -> set:
+    """دریافت خودکار آیدی تمام کسانی که ربات تلگرام را Start کرده‌اند"""
+    subs = set()
+    if TG_CHAT_ID:
+        for cid in re.split(r"[\s,]+", TG_CHAT_ID):
+            if cid:
+                subs.add(str(cid))
+
+    if os.path.exists(SUBS_FILE):
+        try:
+            with open(SUBS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    subs.update(str(x) for x in data if x)
+        except Exception:
+            pass
+
+    if not TG_TOKEN:
+        return subs
+
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+            params={"timeout": 5},
+            timeout=15,
+        )
+        if r.ok:
+            updates = r.json().get("result", [])
+            last_update_id = None
+            new_users = []
+            for u in updates:
+                last_update_id = u.get("update_id")
+                msg = u.get("message") or u.get("my_chat_member") or {}
+                chat = msg.get("chat") or {}
+                cid = str(chat.get("id") or "")
+                text = (msg.get("text") or "").strip().lower()
+                if not cid:
+                    continue
+                if text == "/stop":
+                    subs.discard(cid)
+                else:
+                    if cid not in subs:
+                        subs.add(cid)
+                        new_users.append(cid)
+
+            # ارسال پیام خوش‌آمدگویی به کسانی که تازه /start زده‌اند
+            for cid in new_users:
+                try:
+                    requests.post(
+                        f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                        json={
+                            "chat_id": cid,
+                            "text": "✅ شما با موفقیت در ربات اطلاع‌رسانی مانهوا عضو شدید!\nهر زمان چپتر جدیدی منتشر شود، اینجا برایتان ارسال خواهد شد.",
+                        },
+                        timeout=10,
+                    )
+                except Exception:
+                    pass
+
+            # پاک کردن صف آپدیت‌های خوانده‌شده در تلگرام
+            if last_update_id is not None:
+                requests.get(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                    params={"offset": last_update_id + 1},
+                    timeout=10,
+                )
+    except Exception as e:
+        print(f"Telegram sync error: {e}")
+
+    try:
+        with open(SUBS_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(subs), f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except Exception:
+        pass
+
+    return subs
+
 def comic_walker_latest(url: str):
-    """مخصوص سایت ژاپنی Comic-Walker (KadoComi)"""
     if "comic-walker.com" not in url:
         return None
     m_code = re.search(r"(KC_\d+_S)", url)
@@ -113,7 +191,6 @@ def comic_walker_latest(url: str):
     work_code = m_code.group(1)
     detail_url = f"https://comic-walker.com/detail/{work_code}"
 
-    # ۱. امتحان کردن API رسمی KadoComi
     try:
         api_url = f"https://comic-walker.com/api/contents/details/episode?workCode={work_code}&episodeType=latest"
         r_api = requests.get(api_url, headers={**HEADERS, "Accept": "application/json"}, impersonate="chrome124", timeout=15)
@@ -129,7 +206,6 @@ def comic_walker_latest(url: str):
     except Exception:
         pass
 
-    # ۲. استخراج از __NEXT_DATA__ در صفحه اصلی اثر
     try:
         r = requests.get(detail_url, headers=HEADERS, impersonate="chrome124", timeout=20)
         if r.status_code != 200:
@@ -141,13 +217,11 @@ def comic_walker_latest(url: str):
         next_tag = soup.find("script", id="__NEXT_DATA__")
         search_text = norm(next_tag.string) if (next_tag and next_tag.string) else raw
 
-        # جستجوی تمام عناوین اپیزودها در JSON
         for m in JP_RE.finditer(search_text):
             key, label = _jp(m)
             cands.append((key, label, detail_url))
 
-        # استخراج از کدهای اپیزود مثل KC_0044700008400021_E (که 00084 شماره چپتر است)
-        prefix = work_code[:-2]  # KC_004470
+        prefix = work_code[:-2]
         for m_ep in re.finditer(rf"({prefix}(\d{{5}})(\d{{3}})\d{{2}}_E)", search_text):
             ep_code = m_ep.group(1)
             ch_num = int(m_ep.group(2))
@@ -264,7 +338,7 @@ def embedded_chapters(raw: str, free_only: bool):
     best = max(clusters, key=len) if clusters else {}
     return best[max(best)] if len(best) >= 2 else None
 
-def notify(title: str, message: str, link: str = "") -> bool:
+def notify(title: str, message: str, link: str = "", tg_subs: set = None) -> bool:
     ok = False
     if NTFY_TOPIC:
         payload = {
@@ -283,36 +357,34 @@ def notify(title: str, message: str, link: str = "") -> bool:
         except Exception:
             pass
 
-    if TG_TOKEN and TG_CHAT_ID:
+    if TG_TOKEN and tg_subs:
         text = f"📚 <b>{title}</b>\n{message}"
         if link:
             text += f'\n\n<a href="{link}">📖 باز کردن چپتر</a>'
-        try:
-            r = requests.post(
-                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-                json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"},
-                timeout=15,
-            )
-            ok = ok or r.ok
-        except Exception:
-            pass
+        for cid in tg_subs:
+            try:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                    json={"chat_id": cid, "text": text, "parse_mode": "HTML"},
+                    timeout=15,
+                )
+                ok = ok or r.ok
+            except Exception:
+                pass
     return ok
 
 def get_latest(url: str, selector: str = "", include_paid: bool = False):
     free_only = not include_paid
 
     if not selector.strip():
-        # ۱. بررسی اختصاصی Comic-Walker
         cw = comic_walker_latest(url)
         if cw:
             return cw[0], cw[1]
 
-        # ۲. بررسی اختصاصی سایت‌های HeanCMS (مثل OmegaScans)
         hc = heancms_latest(url, free_only=free_only)
         if hc:
             return hc[0], hc[1]
 
-    # ۳. دریافت صفحه یا فید RSS
     resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
     resp.raise_for_status()
     raw = norm(resp.text)
@@ -329,13 +401,11 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         href = a.get("href", "") if a else ""
         return m.group(0), (urljoin(url, href) if href else url)
 
-    # ۴. اگر خود لینک یک فید RSS/Atom است
     rss_cands = parse_rss_items(soup, url)
     if rss_cands:
         best = max(rss_cands, key=lambda x: x[0])
         return best[1], best[2]
 
-    # ۵. اگر صفحه لینک به فید RSS مخصوص اثر دارد
     for a in soup.select('a[href*="/rss/series/"], link[type*="rss"], link[type*="atom"]'):
         feed_href = a.get("href")
         if feed_href:
@@ -349,18 +419,25 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             except Exception:
                 pass
 
-    # ۶. بررسی لینک‌های HTML صفحه
     anchors = soup.find_all("a")
     paths = [urlparse(resp.url).path.rstrip("/"), urlparse(url).path.rstrip("/")]
     paths = [p for p in dict.fromkeys(paths) if len(p) > 1]
     own_found = False
     if paths:
-        slugs = {p.rstrip("/").split("/")[-1].lower() for p in paths if len(p.rstrip("/").split("/")[-1]) >= 3}
+        slugs = set()
+        for p in paths:
+            sl = p.rstrip("/").split("/")[-1].lower()
+            if len(sl) >= 3:
+                slugs.add(sl)
+                base_sl = re.sub(r"-[0-9a-f]{6,10}$", "", sl)
+                if len(base_sl) >= 3:
+                    slugs.add(base_sl)
+
         def is_own(a):
-            href = a.get("href", "") or ""
-            low = href.lower()
-            return (any(p + "/chapter" in href for p in paths)
-                    or (any(f"/{sl}/" in low for sl in slugs) and bool(CHAPTER_RE.search(href))))
+            href = (a.get("href", "") or "").lower()
+            return (any(p.lower() + "/chapter" in href for p in paths)
+                    or (any(sl in href for sl in slugs) and bool(CHAPTER_RE.search(href))))
+
         own = [a for a in anchors if is_own(a)]
         if own:
             anchors, own_found = own, True
@@ -415,6 +492,9 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     return best[1], (urljoin(url, best[2]) if best[2] else url)
 
 def main():
+    tg_subs = sync_telegram_subscribers()
+    print(f"[*] تعداد اعضای فعال تلگرام: {len(tg_subs)}")
+
     with open(LIST_FILE, "r", encoding="utf-8") as f:
         items = json.load(f)
 
@@ -439,7 +519,7 @@ def main():
             kc, kl = chap_key(ch), chap_key(last)
             if kc and kl and kc > kl and (kc[0] - kl[0] <= 50):
                 print(f"[+] چپتر جدید برای {title}: {last} -> {ch}")
-                notify(f"چپتر جدید: {title}", f"جدید: چپتر {ch}\nقبلی: چپتر {last}", link)
+                notify(f"چپتر جدید: {title}", f"جدید: چپتر {ch}\nقبلی: چپتر {last}", link, tg_subs)
                 it["last_chapter"] = ch
                 it["last_link"] = link
                 changed = True
