@@ -102,25 +102,43 @@ def _paid_row(ch: dict) -> bool:
                 return True
     return False
 
+def fix_chap_url(base_url: str, href: str) -> str:
+    """ساخت آدرس دقیق چپتر (رفع مشکل حذف شدن /comics/ در لینک‌های نسبی AsuraScans)"""
+    if not href:
+        return base_url
+    if href.startswith("http"):
+        return href
+    if "asurascans" in base_url.lower() and not href.startswith("/"):
+        if not href.startswith("comics/"):
+            href = "/comics/" + href.lstrip("/")
+        else:
+            href = "/" + href
+    return urljoin(base_url, href)
+
 def chapter_locked(chap_url: str):
+    is_asura = "asurascans" in chap_url.lower()
     try:
         r = requests.get(chap_url, headers=HEADERS, impersonate="chrome124", timeout=15)
         if r.status_code != 200:
-            return None
+            return True if is_asura else None
         raw_ch = r.text
         soup = BeautifulSoup(raw_ch, "html.parser")
         page_text = soup.get_text(" ", strip=True)
         if LOCKED_RE.search(page_text):
             return True
 
-        # بررسی اختصاصی صفحه چپتر در AsuraScans
-        if "asurascans" in chap_url.lower():
-            # ۱. اگر در دیتای Next.js صفحه نشانه قفل باشد
-            if re.search(r'\\?"(?:is_locked|early_access|is_early_access|locked|premium)\\?"\s*:\s*true', raw_ch, re.I):
+        # بررسی قطعی صفحه چپتر در AsuraScans
+        if is_asura:
+            if re.search(
+                r'\\?"(?:is_locked|early_access|is_early_access|locked|premium|must_pay)\\?"\s*:\s*(?:true|1)'
+                r'|unlock this chapter|early access chapter|asura\+|\bcoins\s+to\s+unlock\b',
+                raw_ch,
+                re.I,
+            ):
                 return True
-            # ۲. در AsuraScans چپتر رایگان حداقل چند عکس در /storage/media/ دارد، اما چپتر قفل‌دار عکس صفحات را ندارد
-            media_imgs = re.findall(r'asuracomic\.net/storage/media/\d+/conversions/', raw_ch)
-            if len(set(media_imgs)) < 3:
+            # در AsuraScans چپتر باز و رایگان حتماً لینک عکس‌های صفحات کمیک (storage/media) را دارد
+            media_imgs = re.findall(r'asuracomic\.net/storage/media/\d+/', raw_ch)
+            if len(set(media_imgs)) < 4:
                 return True
 
         return False
@@ -419,7 +437,7 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             raise ValueError("عددی در متن نبود")
         a = el if el.name == "a" else (el.find("a") or el.find_parent("a"))
         href = a.get("href", "") if a else ""
-        return m.group(0), (urljoin(url, href) if href else url)
+        return m.group(0), fix_chap_url(url, href)
 
     rss_cands = parse_rss_items(soup, url)
     if rss_cands:
@@ -487,13 +505,14 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             m = CHAPTER_RE.search(text or "")
             if m:
                 key = (float(m.group(1)), 0)
-                p_flag = is_paid(a) or (is_asura and bool(a.find("svg")))
+                # در AsuraScans آیکون قفل (svg) داخل خود لینک یا تگ پدرِ لینک قرار دارد
+                asura_svg = is_asura and bool(a.find("svg") or (a.parent and a.parent.find("svg")))
+                p_flag = is_paid(a) or asura_svg
                 if p_flag:
                     paid_keys.add(key)
                 cands.append((key, m.group(1), href, p_flag))
                 break
 
-    # اگر چپتری در لیست پایین صفحه آیکون قفل داشت، دکمه بالای صفحه هم که همان شماره را دارد قفل حساب شود
     if paid_keys:
         cands = [(k, lbl, h, (p or k in paid_keys)) for (k, lbl, h, p) in cands]
 
@@ -501,7 +520,6 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         cands = [c for c in cands if not c[3]]
 
     if free_only and cands:
-        # حذف شماره‌های تکراری قبل از بررسی صفحه چپتر
         uniq = {}
         for c in cands:
             if c[0] not in uniq or (not uniq[c[0]][2] and c[2]):
@@ -512,7 +530,8 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             if not c[2]:
                 keep = c
                 break
-            if chapter_locked(urljoin(url, c[2])) is not True:
+            full_ch_url = fix_chap_url(url, c[2])
+            if chapter_locked(full_ch_url) is not True:
                 keep = c
                 break
         if keep is not None and keep is not ordered[0]:
@@ -527,7 +546,7 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         raise ValueError("چپتری پیدا نشد")
 
     best = max(cands, key=lambda x: x[0])
-    return best[1], (urljoin(url, best[2]) if best[2] else url)
+    return best[1], fix_chap_url(url, best[2])
 
 def main():
     tg_subs = sync_telegram_subscribers()
