@@ -103,7 +103,6 @@ def _paid_row(ch: dict) -> bool:
     return False
 
 def fix_chap_url(base_url: str, href: str) -> str:
-    """ساخت آدرس دقیق چپتر (رفع مشکل حذف شدن /comics/ در لینک‌های نسبی AsuraScans)"""
     if not href:
         return base_url
     if href.startswith("http"):
@@ -116,33 +115,117 @@ def fix_chap_url(base_url: str, href: str) -> str:
     return urljoin(base_url, href)
 
 def chapter_locked(chap_url: str):
-    is_asura = "asurascans" in chap_url.lower()
     try:
         r = requests.get(chap_url, headers=HEADERS, impersonate="chrome124", timeout=15)
         if r.status_code != 200:
-            return True if is_asura else None
-        raw_ch = r.text
-        soup = BeautifulSoup(raw_ch, "html.parser")
-        page_text = soup.get_text(" ", strip=True)
-        if LOCKED_RE.search(page_text):
-            return True
-
-        # بررسی قطعی صفحه چپتر در AsuraScans
-        if is_asura:
-            if re.search(
-                r'\\?"(?:is_locked|early_access|is_early_access|locked|premium|must_pay)\\?"\s*:\s*(?:true|1)'
-                r'|unlock this chapter|early access chapter|asura\+|\bcoins\s+to\s+unlock\b',
-                raw_ch,
-                re.I,
-            ):
-                return True
-            # در AsuraScans چپتر باز و رایگان حتماً لینک عکس‌های صفحات کمیک (storage/media) را دارد
-            media_imgs = re.findall(r'asuracomic\.net/storage/media/\d+/', raw_ch)
-            if len(set(media_imgs)) < 4:
-                return True
-
-        return False
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        return bool(LOCKED_RE.search(soup.get_text(" ", strip=True)))
     except Exception:
+        return None
+
+def asurascans_latest(url: str, free_only: bool = True):
+    """تشخیص اختصاصی و دقیق آخرین چپتر رایگان در AsuraScans"""
+    if "asurascans" not in url.lower():
+        return None
+    try:
+        resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
+        if resp.status_code != 200:
+            return None
+        raw = norm(resp.text)
+        soup = BeautifulSoup(raw, "html.parser")
+
+        p_path = urlparse(resp.url).path.rstrip("/")
+        sl = p_path.split("/")[-1].lower()
+        base_sl = re.sub(r"-[0-9a-f]{6,10}$", "", sl)
+
+        # جمع‌آوری لینک‌های چپتر همین مانهوا
+        chap_map = {}  # num_float -> (label_str, full_url, has_svg_or_paid_in_row)
+        for a in soup.find_all("a"):
+            href = a.get("href", "") or ""
+            low_href = href.lower()
+            if "/chapter/" not in low_href:
+                continue
+            if base_sl and len(base_sl) >= 3 and base_sl not in low_href:
+                continue
+
+            m = re.search(r"/chapter/(\d+(?:\.\d+)?)", low_href) or CHAPTER_RE.search(norm(a.get_text(" ", strip=True)))
+            if not m:
+                continue
+            label = m.group(1)
+            key = float(label)
+            full_u = fix_chap_url(url, href)
+
+            # بررسی وجود آیکون قفل (svg) یا متن قفل داخل ردیفِ جدول چپترها (و نه دکمه‌های بالای صفحه)
+            in_first_last_btn = bool(re.search(r"first\s*chapter|new\s*chapter|latest\s*chapter", norm(a.get_text(" ", strip=True)), re.I))
+            row_paid = False
+            if not in_first_last_btn:
+                row_html = str(a) + " " + (str(a.parent) if a.parent else "")
+                if (
+                    a.find("svg")
+                    or (a.parent and a.parent.find("svg"))
+                    or re.search(r"lock|coin|premium|early|asura\+|<svg", row_html, re.I)
+                ):
+                    row_paid = True
+
+            if key not in chap_map:
+                chap_map[key] = [label, full_u, row_paid]
+            else:
+                if row_paid:
+                    chap_map[key][2] = True
+
+        if not chap_map:
+            return None
+
+        ordered = sorted(chap_map.keys(), reverse=True)
+        if not free_only or len(ordered) == 1:
+            top = chap_map[ordered[0]]
+            return top[0], top[1]
+
+        # ۱. اگر در جدول چپترها، بعضی چپترها آیکون SVG/قفل دارند و بعضی ندارند:
+        paid_flags = [chap_map[k][2] for k in ordered]
+        if any(paid_flags) and not all(paid_flags):
+            for k in ordered:
+                if not chap_map[k][2]:
+                    print(f"[Asura] چپترهای قفل‌دار رد شدند؛ آخرین چپتر رایگان: {chap_map[k][0]}")
+                    return chap_map[k][0], chap_map[k][1]
+
+        # ۲. اگر در HTML جدول، همه یکسان بودند، با باز کردنِ صفحه چپترِ اول و مقایسه با یک چپترِ قدیمی‌تر (که مطمئناً رایگان است) چک کن:
+        ref_key = ordered[min(len(ordered) - 1, 3)]  # مثلاً ۳ چپتر پایین‌تر که حتماً رایگان است
+        r_ref = requests.get(chap_map[ref_key][1], headers=HEADERS, impersonate="chrome124", timeout=15)
+        ref_imgs = len(re.findall(r'<img\b[^>]+src=["\']https?://[^"\']+(?:media|chapter|uploads|comic)[^"\']*["\']', r_ref.text, re.I))
+        if ref_imgs < 3:
+            ref_imgs = len(re.findall(r'https?://[^"\'\s\\]+/storage/media/\d+/', r_ref.text, re.I))
+
+        for k in ordered[:3]:
+            lbl, ch_url, _ = chap_map[k]
+            r_ch = requests.get(ch_url, headers=HEADERS, impersonate="chrome124", timeout=15)
+            txt = r_ch.text
+            soup_ch = BeautifulSoup(txt, "html.parser")
+            visible_txt = soup_ch.get_text(" ", strip=True)
+
+            # اگر متن قفل در صفحه چپتر بود
+            if LOCKED_RE.search(visible_txt):
+                print(f"[Asura] چپتر {lbl} دارای متن قفل است؛ رد شد.")
+                continue
+
+            # شمارش عکس‌های داخل صفحه چپتر
+            ch_imgs = len(re.findall(r'<img\b[^>]+src=["\']https?://[^"\']+(?:media|chapter|uploads|comic)[^"\']*["\']', txt, re.I))
+            if ch_imgs < 3:
+                ch_imgs = len(re.findall(r'https?://[^"\'\s\\]+/storage/media/\d+/', txt, re.I))
+
+            # اگر چپتر مرجع (قدیمی‌تر) عکس‌های داستان را داشت ولی این چپتر جدید نداشت، یعنی قفل است!
+            if ref_imgs >= 4 and ch_imgs < 3:
+                print(f"[Asura] چپتر {lbl} عکس‌های داستان را ندارد ({ch_imgs} در برابر {ref_imgs}) -> قفل است!")
+                continue
+
+            return lbl, ch_url
+
+        # اگر همه قفل تشخیص داده شدند، اولین چپتر غیر از بالاترین را برگردان
+        top = chap_map[ordered[0]]
+        return top[0], top[1]
+    except Exception as e:
+        print(f"Asura check error: {e}")
         return None
 
 def sync_telegram_subscribers() -> set:
@@ -415,10 +498,17 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     free_only = not include_paid
 
     if not selector.strip():
+        # ۰. بررسی اختصاصی AsuraScans
+        asu = asurascans_latest(url, free_only=free_only)
+        if asu:
+            return asu[0], asu[1]
+
+        # ۱. بررسی اختصاصی Comic-Walker
         cw = comic_walker_latest(url)
         if cw:
             return cw[0], cw[1]
 
+        # ۲. بررسی اختصاصی HeanCMS (مثل OmegaScans)
         hc = heancms_latest(url, free_only=free_only)
         if hc:
             return hc[0], hc[1]
@@ -461,7 +551,6 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     paths = [urlparse(resp.url).path.rstrip("/"), urlparse(url).path.rstrip("/")]
     paths = [p for p in dict.fromkeys(paths) if len(p) > 1]
     own_found = False
-    is_asura = "asurascans" in url.lower()
     if paths:
         slugs = set()
         for p in paths:
@@ -490,31 +579,18 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             anchors = [a for a in anchors if id(a) not in skip]
 
     cands = []
-    paid_keys = set()
     for a in anchors:
         href = a.get("href", "") or ""
         for text in (norm(a.get_text(" ", strip=True)), href):
             m = JP_RE.search(text or "")
             if m:
                 key, label = _jp(m)
-                p_flag = is_paid(a)
-                if p_flag:
-                    paid_keys.add(key)
-                cands.append((key, label, href, p_flag))
+                cands.append((key, label, href, is_paid(a)))
                 break
             m = CHAPTER_RE.search(text or "")
             if m:
-                key = (float(m.group(1)), 0)
-                # در AsuraScans آیکون قفل (svg) داخل خود لینک یا تگ پدرِ لینک قرار دارد
-                asura_svg = is_asura and bool(a.find("svg") or (a.parent and a.parent.find("svg")))
-                p_flag = is_paid(a) or asura_svg
-                if p_flag:
-                    paid_keys.add(key)
-                cands.append((key, m.group(1), href, p_flag))
+                cands.append(((float(m.group(1)), 0), m.group(1), href, is_paid(a)))
                 break
-
-    if paid_keys:
-        cands = [(k, lbl, h, (p or k in paid_keys)) for (k, lbl, h, p) in cands]
 
     if free_only and any(not c[3] for c in cands):
         cands = [c for c in cands if not c[3]]
@@ -530,8 +606,7 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             if not c[2]:
                 keep = c
                 break
-            full_ch_url = fix_chap_url(url, c[2])
-            if chapter_locked(full_ch_url) is not True:
+            if chapter_locked(fix_chap_url(url, c[2])) is not True:
                 keep = c
                 break
         if keep is not None and keep is not ordered[0]:
