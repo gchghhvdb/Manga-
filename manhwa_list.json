@@ -212,6 +212,7 @@
     "url": "https://m.comic.naver.com/webtoon/list?titleId=829743",
     "selector": "",
     "include_paid": false,
-    "last_chapter": ""
+    "last_chapter": "97",
+    "last_link": "https://m.comic.naver.com/webtoon/detail?titleId=829743&no=97"
   }
 ]
