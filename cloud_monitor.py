@@ -33,21 +33,18 @@ JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part|\
 RSS_N_RE = re.compile(r"(?:^|[\[\(【\s])(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート)?\s*(\d+))?")
 KEY_RE = re.compile(r"\s*(\d+(?:\.\d+)?)(?:\s*その\s*(\d+))?")
 RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular|weekly|monthly", re.I)
-
-# اضافه شدن آیکون قفل SVG و برچسب‌های پولی مخصوص AsuraScans
 PAID_RE = re.compile(
     r"\b(?:lock(?:ed)?|coins?|premium|paywall|early\s*access)\b"
-    r"|asura\+|lucide-lock|fa-lock|🔒|🪙"
-    r"|M16\.5\s*10\.5V6\.75a4\.5\s*4\.5|M12\s*15v2m-6\s*4h12a2\s*2"
-    r"|<rect[^>]+rx=[\"']2[\"'][^>]+>.*?<path[^>]+d=[\"']M7\s+11V7a5\s+5",
-    re.I | re.S,
+    r"|asura\+|lucide-lock|fa-lock|🔒|🪙",
+    re.I,
 )
 OPEN_RE = re.compile(r"[\w-]*(?:unlock|lock[\w-]*open)[\w-]*", re.I)
 EMB_RE = re.compile(r"\{[^{}]*?chapter_(?:name|slug)[^{}]*\}")
 LOCKED_RE = re.compile(
     r"locked chapter|waiting to be unlocked|chapter is locked|login to unlock chapter"
     r"|cost to unlock|sign in to unlock|unlock this (?:exciting )?chapter"
-    r"|early access|asura\+|subscribe to read|purchase this chapter|unlock with",
+    r"|early access|asura\+|subscribe to read|purchase this chapter|unlock with"
+    r"|this chapter is locked|premium chapter|read early with",
     re.I,
 )
 
@@ -76,9 +73,6 @@ def _chap_anchor(x) -> bool:
 
 def is_paid(tag) -> bool:
     if _paid_text(tag):
-        return True
-    # در AsuraScans اگر داخل تگ لینکِ چپتر یک تگ <svg> کنار اسم چپتر باشد، نشانه قفل است
-    if tag.find("svg") and "asurascans" in str(tag.get("href", "")).lower():
         return True
     row, node = tag, tag.parent
     while node is not None and getattr(node, "name", None) not in (None, "body", "html", "[document]"):
@@ -113,14 +107,22 @@ def chapter_locked(chap_url: str):
         r = requests.get(chap_url, headers=HEADERS, impersonate="chrome124", timeout=15)
         if r.status_code != 200:
             return None
-        soup = BeautifulSoup(r.text, "html.parser")
+        raw_ch = r.text
+        soup = BeautifulSoup(raw_ch, "html.parser")
         page_text = soup.get_text(" ", strip=True)
         if LOCKED_RE.search(page_text):
             return True
-        # در صفحه چپتر قفل‌شده‌ی AsuraScans، عکس‌های چپتر لود نمی‌شوند و پیام قفل/اشتراک وسط صفحه است
+
+        # بررسی اختصاصی صفحه چپتر در AsuraScans
         if "asurascans" in chap_url.lower():
-            if re.search(r'"is_locked"\s*:\s*true|"early_access"\s*:\s*true|"is_early_access"\s*:\s*true', r.text, re.I):
+            # ۱. اگر در دیتای Next.js صفحه نشانه قفل باشد
+            if re.search(r'\\?"(?:is_locked|early_access|is_early_access|locked|premium)\\?"\s*:\s*true', raw_ch, re.I):
                 return True
+            # ۲. در AsuraScans چپتر رایگان حداقل چند عکس در /storage/media/ دارد، اما چپتر قفل‌دار عکس صفحات را ندارد
+            media_imgs = re.findall(r'asuracomic\.net/storage/media/\d+/conversions/', raw_ch)
+            if len(set(media_imgs)) < 3:
+                return True
+
         return False
     except Exception:
         return None
@@ -470,25 +472,41 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             anchors = [a for a in anchors if id(a) not in skip]
 
     cands = []
+    paid_keys = set()
     for a in anchors:
         href = a.get("href", "") or ""
         for text in (norm(a.get_text(" ", strip=True)), href):
             m = JP_RE.search(text or "")
             if m:
                 key, label = _jp(m)
-                cands.append((key, label, href, is_paid(a)))
+                p_flag = is_paid(a)
+                if p_flag:
+                    paid_keys.add(key)
+                cands.append((key, label, href, p_flag))
                 break
             m = CHAPTER_RE.search(text or "")
             if m:
-                paid_flag = is_paid(a) or (is_asura and bool(a.find("svg")))
-                cands.append(((float(m.group(1)), 0), m.group(1), href, paid_flag))
+                key = (float(m.group(1)), 0)
+                p_flag = is_paid(a) or (is_asura and bool(a.find("svg")))
+                if p_flag:
+                    paid_keys.add(key)
+                cands.append((key, m.group(1), href, p_flag))
                 break
+
+    # اگر چپتری در لیست پایین صفحه آیکون قفل داشت، دکمه بالای صفحه هم که همان شماره را دارد قفل حساب شود
+    if paid_keys:
+        cands = [(k, lbl, h, (p or k in paid_keys)) for (k, lbl, h, p) in cands]
 
     if free_only and any(not c[3] for c in cands):
         cands = [c for c in cands if not c[3]]
 
     if free_only and cands:
-        ordered = sorted(cands, key=lambda c: c[0], reverse=True)
+        # حذف شماره‌های تکراری قبل از بررسی صفحه چپتر
+        uniq = {}
+        for c in cands:
+            if c[0] not in uniq or (not uniq[c[0]][2] and c[2]):
+                uniq[c[0]] = c
+        ordered = sorted(uniq.values(), key=lambda c: c[0], reverse=True)
         keep = None
         for c in ordered[:3]:
             if not c[2]:
