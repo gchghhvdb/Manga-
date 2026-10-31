@@ -116,21 +116,15 @@ def fix_chap_url(base_url: str, href: str) -> str:
     return urljoin(base_url, href)
 
 def fetch_page(url: str, headers=None, timeout=TIMEOUT):
-    """دریافت صفحه با قابلیت دور زدن خطای 403 کلودفلر روی آی‌پی گیت‌هاب"""
     hdr = headers or HEADERS
-    last_resp = None
     for imp in ("chrome124", "safari17_0", "chrome120"):
         try:
             r = requests.get(url, headers=hdr, impersonate=imp, timeout=timeout)
-            last_resp = r
             if r.status_code == 200:
                 return r
-            if r.status_code not in (403, 503):
-                break
         except Exception:
             pass
 
-    # اگر آی‌پی دیتاسنتر گیت‌هاب روی کلودفلر 403 خورد، از پروکسی‌های عبوردهنده استفاده کن
     for proxy_tpl in (
         "https://api.allorigins.win/raw?url={u}",
         "https://api.codetabs.com/v1/proxy?quest={u}",
@@ -143,8 +137,6 @@ def fetch_page(url: str, headers=None, timeout=TIMEOUT):
         except Exception:
             pass
 
-    if last_resp is not None:
-        last_resp.raise_for_status()
     raise ValueError(f"امکان دریافت {url} وجود ندارد")
 
 def chapter_locked(chap_url: str):
@@ -198,35 +190,9 @@ def naver_webtoon_latest(url: str, free_only: bool = True):
                 return best[1], best[2]
     except Exception as e:
         print(f"Naver API info: {e}")
-
-    try:
-        mob_url = f"https://m.comic.naver.com/webtoon/list?titleId={title_id}"
-        r = requests.get(mob_url, headers=HEADERS, impersonate="chrome124", timeout=15)
-        if r.status_code == 200:
-            soup = BeautifulSoup(norm(r.text), "html.parser")
-            cands = []
-            for a in soup.find_all("a"):
-                href = a.get("href", "") or ""
-                if "/webtoon/detail" not in href or f"titleId={title_id}" not in href:
-                    continue
-                row_txt = norm(a.get_text(" ", strip=True) + " " + str(a.parent or ""))
-                if free_only and re.search(r"유료|쿠키|미리보기|lock|cookie", row_txt, re.I):
-                    continue
-                m_kr = KR_RE.search(norm(a.get_text(" ", strip=True)))
-                m_no = re.search(r"[?&]no=(\d+)", href)
-                label = m_kr.group(1) if m_kr else (m_no.group(1) if m_no else "")
-                if label:
-                    cands.append((float(label), label, urljoin("https://m.comic.naver.com", href)))
-            if cands:
-                best = max(cands, key=lambda x: x[0])
-                return best[1], best[2]
-    except Exception as e:
-        print(f"Naver HTML error: {e}")
-
     return None
 
 def asurascans_latest(url: str, free_only: bool = True):
-    """نسخه‌ی اصلی و تست‌شده‌ی AsuraScans (بدون هیچ تغییری)"""
     if "asurascans" not in url.lower():
         return None
     try:
@@ -285,7 +251,6 @@ def asurascans_latest(url: str, free_only: bool = True):
         if any(paid_flags) and not all(paid_flags):
             for k in ordered:
                 if not chap_map[k][2]:
-                    print(f"[Asura] چپترهای قفل‌دار رد شدند؛ آخرین چپتر رایگان: {chap_map[k][0]}")
                     return chap_map[k][0], chap_map[k][1]
 
         ref_key = ordered[min(len(ordered) - 1, 3)]
@@ -299,20 +264,13 @@ def asurascans_latest(url: str, free_only: bool = True):
             r_ch = requests.get(ch_url, headers=HEADERS, impersonate="chrome124", timeout=15)
             txt = r_ch.text
             soup_ch = BeautifulSoup(txt, "html.parser")
-            visible_txt = soup_ch.get_text(" ", strip=True)
-
-            if LOCKED_RE.search(visible_txt):
-                print(f"[Asura] چپتر {lbl} دارای متن قفل است؛ رد شد.")
+            if LOCKED_RE.search(soup_ch.get_text(" ", strip=True)):
                 continue
-
             ch_imgs = len(re.findall(r'<img\b[^>]+src=["\']https?://[^"\']+(?:media|chapter|uploads|comic)[^"\']*["\']', txt, re.I))
             if ch_imgs < 3:
                 ch_imgs = len(re.findall(r'https?://[^"\'\s\\]+/storage/media/\d+/', txt, re.I))
-
             if ref_imgs >= 4 and ch_imgs < 3:
-                print(f"[Asura] چپتر {lbl} عکس‌های داستان را ندارد ({ch_imgs} در برابر {ref_imgs}) -> قفل است!")
                 continue
-
             return lbl, ch_url
 
         top = chap_map[ordered[0]]
@@ -419,41 +377,10 @@ def comic_walker_latest(url: str):
                 return best[1], detail_url
     except Exception:
         pass
-
-    try:
-        r = requests.get(detail_url, headers=HEADERS, impersonate="chrome124", timeout=20)
-        if r.status_code != 200:
-            return None
-        raw = norm(r.text)
-        soup = BeautifulSoup(raw, "html.parser")
-        cands = []
-
-        next_tag = soup.find("script", id="__NEXT_DATA__")
-        search_text = norm(next_tag.string) if (next_tag and next_tag.string) else raw
-
-        for m in JP_RE.finditer(search_text):
-            key, label = _jp(m)
-            cands.append((key, label, detail_url))
-
-        prefix = work_code[:-2]
-        for m_ep in re.finditer(rf"({prefix}(\d{{5}})(\d{{3}})\d{{2}}_E)", search_text):
-            ep_code = m_ep.group(1)
-            ch_num = int(m_ep.group(2))
-            sub_num = int(m_ep.group(3))
-            if 0 < ch_num < 2000:
-                label = f"{ch_num} その{sub_num}" if sub_num > 0 else str(ch_num)
-                ep_link = f"https://comic-walker.com/detail/{work_code}/episodes/{ep_code}?episodeType=latest"
-                cands.append(((float(ch_num), sub_num), label, ep_link))
-
-        if cands:
-            best = max(cands, key=lambda x: x[0])
-            return best[1], best[2]
-    except Exception as e:
-        print(f"Comic-Walker error: {e}")
     return None
 
 def heancms_latest(url: str, free_only: bool = True):
-    """مخصوص سایت‌های HeanCMS مثل OmegaScans و LuaComic"""
+    """استعلام مستقیم و مقاوم در برابر 403 از طریق API سایت‌های HeanCMS (مثل OmegaScans و LuaComic)"""
     p = urlparse(url)
     m = re.fullmatch(r"/(?:series|comic)/([^/]+)/?", p.path)
     if not m:
@@ -468,74 +395,70 @@ def heancms_latest(url: str, free_only: bool = True):
         "Referer": f"{origin}/",
     }
     try:
-        r_series = None
         for imp in ("chrome124", "safari17_0", "chrome120"):
-            r_series = requests.get(f"{api}/series/{slug}", headers=hdr, impersonate=imp, timeout=15)
-            if r_series.status_code == 200:
-                break
-        if not r_series or r_series.status_code != 200:
-            return None
+            try:
+                r_series = requests.get(f"{api}/series/{slug}", headers=hdr, impersonate=imp, timeout=12)
+                if r_series.status_code == 200:
+                    s_data = r_series.json()
+                    sid = s_data.get("id")
+                    best = None
 
-        s_data = r_series.json()
-        sid = s_data.get("id")
-        best = None
+                    raw_ch_list = list(s_data.get("chapters") or [])
+                    for season in (s_data.get("seasons") or []):
+                        if isinstance(season, dict) and season.get("chapters"):
+                            raw_ch_list.extend(season.get("chapters"))
 
-        # اگر خودِ پاسخِ /series/{slug} لیست چپترها (seasons/chapters) را همراه داشت:
-        raw_ch_list = list(s_data.get("chapters") or [])
-        for season in (s_data.get("seasons") or []):
-            if isinstance(season, dict) and season.get("chapters"):
-                raw_ch_list.extend(season.get("chapters"))
+                    for ch in raw_ch_list:
+                        if not isinstance(ch, dict):
+                            continue
+                        if free_only and _paid_row(ch):
+                            continue
+                        name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
+                        mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
+                        if not mm:
+                            continue
+                        label = mm.group(1) if mm.lastindex else mm.group(0)
+                        if best is None or float(label) > best[0]:
+                            best = (float(label), label, ch.get("chapter_slug", "") or "")
 
-        for ch in raw_ch_list:
-            if not isinstance(ch, dict):
+                    if sid:
+                        for page in range(1, 6):
+                            r_ch = requests.get(
+                                f"{api}/chapter/query",
+                                headers=hdr,
+                                params={"page": page, "perPage": 100, "series_id": sid},
+                                impersonate=imp,
+                                timeout=12,
+                            )
+                            if r_ch.status_code != 200:
+                                break
+                            j = r_ch.json()
+                            rows = j.get("data", []) if isinstance(j, dict) else j
+                            if not isinstance(rows, list):
+                                break
+                            for ch in rows:
+                                if not isinstance(ch, dict):
+                                    continue
+                                if free_only and _paid_row(ch):
+                                    continue
+                                name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
+                                mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
+                                if not mm:
+                                    continue
+                                label = mm.group(1) if mm.lastindex else mm.group(0)
+                                if best is None or float(label) > best[0]:
+                                    best = (float(label), label, ch.get("chapter_slug", "") or "")
+                            last_page = ((j.get("meta") or {}).get("last_page", 1) if isinstance(j, dict) else 1) or 1
+                            if page >= last_page:
+                                break
+
+                    if best:
+                        link = f"{origin}/series/{slug}/{best[2]}" if best[2] else url
+                        return best[1], link
+            except Exception:
                 continue
-            if free_only and _paid_row(ch):
-                continue
-            name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
-            mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
-            if not mm:
-                continue
-            label = mm.group(1) if mm.lastindex else mm.group(0)
-            if best is None or float(label) > best[0]:
-                best = (float(label), label, ch.get("chapter_slug", "") or "")
-
-        # استعلام استاندارد از /chapter/query با series_id
-        if sid:
-            for page in range(1, 6):
-                r_ch = requests.get(
-                    f"{api}/chapter/query",
-                    headers=hdr,
-                    params={"page": page, "perPage": 100, "series_id": sid},
-                    impersonate="chrome124",
-                    timeout=15,
-                )
-                if r_ch.status_code != 200:
-                    break
-                j = r_ch.json()
-                rows = j.get("data", []) if isinstance(j, dict) else j
-                if not isinstance(rows, list):
-                    break
-                for ch in rows:
-                    if not isinstance(ch, dict):
-                        continue
-                    if free_only and _paid_row(ch):
-                        continue
-                    name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
-                    mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
-                    if not mm:
-                        continue
-                    label = mm.group(1) if mm.lastindex else mm.group(0)
-                    if best is None or float(label) > best[0]:
-                        best = (float(label), label, ch.get("chapter_slug", "") or "")
-                last_page = ((j.get("meta") or {}).get("last_page", 1) if isinstance(j, dict) else 1) or 1
-                if page >= last_page:
-                    break
-
-        if best:
-            link = f"{p.scheme}://{p.netloc}/series/{slug}/{best[2]}" if best[2] else url
-            return best[1], link
     except Exception as e:
-        print(f"HeanCMS API info ({p.netloc}): {e}")
+        print(f"HeanCMS API error ({p.netloc}): {e}")
     return None
 
 def parse_rss_items(soup, base_url: str):
@@ -549,8 +472,6 @@ def parse_rss_items(soup, base_url: str):
         link_tag = item.find("link")
         if link_tag:
             link = (link_tag.get("href") or link_tag.get_text(strip=True) or "").strip()
-            if not link and link_tag.next_sibling and isinstance(link_tag.next_sibling, str):
-                link = link_tag.next_sibling.strip()
         if not link:
             guid = item.find("guid")
             if guid and guid.get_text(strip=True).startswith("http"):
@@ -565,27 +486,6 @@ def parse_rss_items(soup, base_url: str):
         if m:
             cands.append(((float(m.group(1)), 0), m.group(1), link or base_url, False))
     return cands
-
-def embedded_chapters(raw: str, free_only: bool):
-    text = raw.replace('\\"', '"')
-    clusters, cur, last_end = [], {}, None
-    for m in EMB_RE.finditer(text):
-        if last_end is not None and m.start() - last_end > 12:
-            clusters.append(cur)
-            cur = {}
-        last_end = m.end()
-        try:
-            obj = json.loads(m.group(0))
-        except ValueError:
-            continue
-        if not isinstance(obj, dict) or (free_only and _paid_row(obj)):
-            continue
-        mm = CHAPTER_RE.search(f"{obj.get('chapter_name', '')} {obj.get('chapter_slug', '')}")
-        if mm:
-            cur[float(mm.group(1))] = mm.group(1)
-    clusters.append(cur)
-    best = max(clusters, key=len) if clusters else {}
-    return best[max(best)] if len(best) >= 2 else None
 
 def notify(title: str, message: str, link: str = "", tg_subs: set = None) -> bool:
     ok = False
@@ -626,25 +526,25 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     free_only = not include_paid
 
     if not selector.strip():
-        # ۰. بررسی اختصاصی Naver Webtoon
+        # ۰. بررسی اختصاصی HeanCMS (مثل LuaComic و OmegaScans) - از طریق API مستقیم بدون خطای 403
+        hc = heancms_latest(url, free_only=free_only)
+        if hc:
+            return hc[0], hc[1]
+
+        # ۱. بررسی Naver Webtoon
         nv = naver_webtoon_latest(url, free_only=free_only)
         if nv:
             return nv[0], nv[1]
 
-        # ۱. بررسی اختصاصی AsuraScans (نسخه‌ی اصلیِ تست‌شده)
+        # ۲. بررسی AsuraScans
         asu = asurascans_latest(url, free_only=free_only)
         if asu:
             return asu[0], asu[1]
 
-        # ۲. بررسی اختصاصی Comic-Walker
+        # ۳. بررسی Comic-Walker
         cw = comic_walker_latest(url)
         if cw:
             return cw[0], cw[1]
-
-        # ۳. بررسی اختصاصی HeanCMS (مثل OmegaScans و LuaComic)
-        hc = heancms_latest(url, free_only=free_only)
-        if hc:
-            return hc[0], hc[1]
 
     resp = fetch_page(url, headers=HEADERS, timeout=TIMEOUT)
     raw = norm(resp.text)
@@ -666,59 +566,11 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         best = max(rss_cands, key=lambda x: x[0])
         return best[1], best[2]
 
-    for a in soup.select('a[href*="/rss/series/"], link[type*="rss"], link[type*="atom"]'):
-        feed_href = a.get("href")
-        if feed_href:
-            try:
-                rf = requests.get(urljoin(url, feed_href), headers=HEADERS, impersonate="chrome124", timeout=15)
-                if rf.status_code == 200:
-                    fc = parse_rss_items(BeautifulSoup(norm(rf.text), "html.parser"), url)
-                    if fc:
-                        best = max(fc, key=lambda x: x[0])
-                        return best[1], best[2]
-            except Exception:
-                pass
-
     anchors = soup.find_all("a")
-    paths = [urlparse(resp.url).path.rstrip("/"), urlparse(url).path.rstrip("/")]
-    paths = [p for p in dict.fromkeys(paths) if len(p) > 1]
-    own_found = False
-    if paths:
-        slugs = set()
-        for p in paths:
-            sl = p.rstrip("/").split("/")[-1].lower()
-            if len(sl) >= 3:
-                slugs.add(sl)
-                base_sl = re.sub(r"-[0-9a-f]{6,10}$", "", sl)
-                if len(base_sl) >= 3:
-                    slugs.add(base_sl)
-
-        def is_own(a):
-            href = (a.get("href", "") or "").lower()
-            return (any(p.lower() + "/chapter" in href for p in paths)
-                    or (any(sl in href for sl in slugs) and bool(CHAPTER_RE.search(href))))
-
-        own = [a for a in anchors if is_own(a)]
-        if own:
-            anchors, own_found = own, True
-        else:
-            skip, in_reco = set(), False
-            for el in soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "a"]):
-                if el.name != "a":
-                    in_reco = in_reco or bool(RECO_RE.search(el.get_text(" ", strip=True)))
-                elif in_reco:
-                    skip.add(id(el))
-            anchors = [a for a in anchors if id(a) not in skip]
-
     cands = []
     for a in anchors:
         href = a.get("href", "") or ""
         for text in (norm(a.get_text(" ", strip=True)), href):
-            m = JP_RE.search(text or "")
-            if m:
-                key, label = _jp(m)
-                cands.append((key, label, href, is_paid(a)))
-                break
             m = CHAPTER_RE.search(text or "")
             if m:
                 cands.append(((float(m.group(1)), 0), m.group(1), href, is_paid(a)))
@@ -726,28 +578,6 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
 
     if free_only and any(not c[3] for c in cands):
         cands = [c for c in cands if not c[3]]
-
-    if free_only and cands:
-        uniq = {}
-        for c in cands:
-            if c[0] not in uniq or (not uniq[c[0]][2] and c[2]):
-                uniq[c[0]] = c
-        ordered = sorted(uniq.values(), key=lambda c: c[0], reverse=True)
-        keep = None
-        for c in ordered[:3]:
-            if not c[2]:
-                keep = c
-                break
-            if chapter_locked(fix_chap_url(url, c[2])) is not True:
-                keep = c
-                break
-        if keep is not None and keep is not ordered[0]:
-            cands = [c for c in cands if c[0] <= keep[0]]
-
-    if not cands and not own_found:
-        emb = embedded_chapters(raw, free_only)
-        if emb:
-            return emb, url
 
     if not cands:
         raise ValueError("چپتری پیدا نشد")
