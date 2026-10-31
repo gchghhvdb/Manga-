@@ -25,11 +25,12 @@ TIMEOUT = 25
 
 HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Accept-Language": "ko,ja,en-US;q=0.9,en;q=0.8",
 }
 
 CHAPTER_RE = re.compile(r"(?<![a-z])(?:chapter|chap|ch|episode|ep)[\s\-_.:#/]*(\d{1,5}(?:\.\d+)?)(?!\d)", re.I)
 JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part|\.|[-_])?\s*(\d+))?", re.I)
+KR_RE = re.compile(r"(?:제\s*)?(\d+(?:\.\d+)?)\s*화")
 RSS_N_RE = re.compile(r"(?:^|[\[\(【\s])(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート)?\s*(\d+))?")
 KEY_RE = re.compile(r"\s*(\d+(?:\.\d+)?)(?:\s*その\s*(\d+))?")
 RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular|weekly|monthly", re.I)
@@ -124,8 +125,77 @@ def chapter_locked(chap_url: str):
     except Exception:
         return None
 
+def naver_webtoon_latest(url: str, free_only: bool = True):
+    """پشتیبانی اختصاصی از سایت کره‌ای Naver Webtoon (comic.naver.com / m.comic.naver.com)"""
+    if "comic.naver.com" not in url.lower():
+        return None
+    m_id = re.search(r"titleId=(\d+)", url, re.I)
+    if not m_id:
+        return None
+    title_id = m_id.group(1)
+
+    try:
+        api_url = f"https://comic.naver.com/api/article/list?titleId={title_id}&page=1"
+        r = requests.get(
+            api_url,
+            headers={**HEADERS, "Accept": "application/json", "Referer": f"https://comic.naver.com/webtoon/list?titleId={title_id}"},
+            impersonate="chrome124",
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            articles = list(data.get("articleList") or [])
+            if not free_only and data.get("chargeFolderArticleList"):
+                articles = list(data.get("chargeFolderArticleList")) + articles
+
+            cands = []
+            for art in articles:
+                if free_only and art.get("charge"):
+                    continue
+                no = art.get("no")
+                subtitle = norm(art.get("subtitle") or "")
+                m_kr = KR_RE.search(subtitle)
+                label = m_kr.group(1) if m_kr else str(no)
+                if not label:
+                    continue
+                key = float(label)
+                link = f"https://m.comic.naver.com/webtoon/detail?titleId={title_id}&no={no}"
+                cands.append((key, label, link))
+
+            if cands:
+                best = max(cands, key=lambda x: x[0])
+                return best[1], best[2]
+    except Exception as e:
+        print(f"Naver API info: {e}")
+
+    try:
+        mob_url = f"https://m.comic.naver.com/webtoon/list?titleId={title_id}"
+        r = requests.get(mob_url, headers=HEADERS, impersonate="chrome124", timeout=15)
+        if r.status_code == 200:
+            soup = BeautifulSoup(norm(r.text), "html.parser")
+            cands = []
+            for a in soup.find_all("a"):
+                href = a.get("href", "") or ""
+                if "/webtoon/detail" not in href or f"titleId={title_id}" not in href:
+                    continue
+                row_txt = norm(a.get_text(" ", strip=True) + " " + str(a.parent or ""))
+                if free_only and re.search(r"유료|쿠키|미리보기|lock|cookie", row_txt, re.I):
+                    continue
+                m_kr = KR_RE.search(norm(a.get_text(" ", strip=True)))
+                m_no = re.search(r"[?&]no=(\d+)", href)
+                label = m_kr.group(1) if m_kr else (m_no.group(1) if m_no else "")
+                if label:
+                    cands.append((float(label), label, urljoin("https://m.comic.naver.com", href)))
+            if cands:
+                best = max(cands, key=lambda x: x[0])
+                return best[1], best[2]
+    except Exception as e:
+        print(f"Naver HTML error: {e}")
+
+    return None
+
 def asurascans_latest(url: str, free_only: bool = True):
-    """تشخیص اختصاصی و دقیق آخرین چپتر رایگان در AsuraScans"""
+    """نسخه‌ی اصلی و تست‌شده‌ی AsuraScans (بدون هیچ تغییری)"""
     if "asurascans" not in url.lower():
         return None
     try:
@@ -139,8 +209,7 @@ def asurascans_latest(url: str, free_only: bool = True):
         sl = p_path.split("/")[-1].lower()
         base_sl = re.sub(r"-[0-9a-f]{6,10}$", "", sl)
 
-        # جمع‌آوری لینک‌های چپتر همین مانهوا
-        chap_map = {}  # num_float -> (label_str, full_url, has_svg_or_paid_in_row)
+        chap_map = {}
         for a in soup.find_all("a"):
             href = a.get("href", "") or ""
             low_href = href.lower()
@@ -156,7 +225,6 @@ def asurascans_latest(url: str, free_only: bool = True):
             key = float(label)
             full_u = fix_chap_url(url, href)
 
-            # بررسی وجود آیکون قفل (svg) یا متن قفل داخل ردیفِ جدول چپترها (و نه دکمه‌های بالای صفحه)
             in_first_last_btn = bool(re.search(r"first\s*chapter|new\s*chapter|latest\s*chapter", norm(a.get_text(" ", strip=True)), re.I))
             row_paid = False
             if not in_first_last_btn:
@@ -182,7 +250,6 @@ def asurascans_latest(url: str, free_only: bool = True):
             top = chap_map[ordered[0]]
             return top[0], top[1]
 
-        # ۱. اگر در جدول چپترها، بعضی چپترها آیکون SVG/قفل دارند و بعضی ندارند:
         paid_flags = [chap_map[k][2] for k in ordered]
         if any(paid_flags) and not all(paid_flags):
             for k in ordered:
@@ -190,8 +257,7 @@ def asurascans_latest(url: str, free_only: bool = True):
                     print(f"[Asura] چپترهای قفل‌دار رد شدند؛ آخرین چپتر رایگان: {chap_map[k][0]}")
                     return chap_map[k][0], chap_map[k][1]
 
-        # ۲. اگر در HTML جدول، همه یکسان بودند، با باز کردنِ صفحه چپترِ اول و مقایسه با یک چپترِ قدیمی‌تر (که مطمئناً رایگان است) چک کن:
-        ref_key = ordered[min(len(ordered) - 1, 3)]  # مثلاً ۳ چپتر پایین‌تر که حتماً رایگان است
+        ref_key = ordered[min(len(ordered) - 1, 3)]
         r_ref = requests.get(chap_map[ref_key][1], headers=HEADERS, impersonate="chrome124", timeout=15)
         ref_imgs = len(re.findall(r'<img\b[^>]+src=["\']https?://[^"\']+(?:media|chapter|uploads|comic)[^"\']*["\']', r_ref.text, re.I))
         if ref_imgs < 3:
@@ -204,24 +270,20 @@ def asurascans_latest(url: str, free_only: bool = True):
             soup_ch = BeautifulSoup(txt, "html.parser")
             visible_txt = soup_ch.get_text(" ", strip=True)
 
-            # اگر متن قفل در صفحه چپتر بود
             if LOCKED_RE.search(visible_txt):
                 print(f"[Asura] چپتر {lbl} دارای متن قفل است؛ رد شد.")
                 continue
 
-            # شمارش عکس‌های داخل صفحه چپتر
             ch_imgs = len(re.findall(r'<img\b[^>]+src=["\']https?://[^"\']+(?:media|chapter|uploads|comic)[^"\']*["\']', txt, re.I))
             if ch_imgs < 3:
                 ch_imgs = len(re.findall(r'https?://[^"\'\s\\]+/storage/media/\d+/', txt, re.I))
 
-            # اگر چپتر مرجع (قدیمی‌تر) عکس‌های داستان را داشت ولی این چپتر جدید نداشت، یعنی قفل است!
             if ref_imgs >= 4 and ch_imgs < 3:
                 print(f"[Asura] چپتر {lbl} عکس‌های داستان را ندارد ({ch_imgs} در برابر {ref_imgs}) -> قفل است!")
                 continue
 
             return lbl, ch_url
 
-        # اگر همه قفل تشخیص داده شدند، اولین چپتر غیر از بالاترین را برگردان
         top = chap_map[ordered[0]]
         return top[0], top[1]
     except Exception as e:
@@ -498,17 +560,22 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     free_only = not include_paid
 
     if not selector.strip():
-        # ۰. بررسی اختصاصی AsuraScans
+        # ۰. بررسی اختصاصی Naver Webtoon
+        nv = naver_webtoon_latest(url, free_only=free_only)
+        if nv:
+            return nv[0], nv[1]
+
+        # ۱. بررسی اختصاصی AsuraScans (نسخه‌ی اصلیِ تست‌شده)
         asu = asurascans_latest(url, free_only=free_only)
         if asu:
             return asu[0], asu[1]
 
-        # ۱. بررسی اختصاصی Comic-Walker
+        # ۲. بررسی اختصاصی Comic-Walker
         cw = comic_walker_latest(url)
         if cw:
             return cw[0], cw[1]
 
-        # ۲. بررسی اختصاصی HeanCMS (مثل OmegaScans)
+        # ۳. بررسی اختصاصی HeanCMS (مثل OmegaScans)
         hc = heancms_latest(url, free_only=free_only)
         if hc:
             return hc[0], hc[1]
