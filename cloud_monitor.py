@@ -33,12 +33,22 @@ JP_RE = re.compile(r"第\s*(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート|part|\
 RSS_N_RE = re.compile(r"(?:^|[\[\(【\s])(\d+(?:\.\d+)?)\s*話(?:\s*(?:その|パート)?\s*(\d+))?")
 KEY_RE = re.compile(r"\s*(\d+(?:\.\d+)?)(?:\s*その\s*(\d+))?")
 RECO_RE = re.compile(r"recommend|related|similar|you may also|more like|trending|popular|weekly|monthly", re.I)
-PAID_RE = re.compile(r"\b(?:lock(?:ed)?|coins?|premium|paywall)\b|lucide-lock|fa-lock|🔒|🪙", re.I)
+
+# اضافه شدن آیکون قفل SVG و برچسب‌های پولی مخصوص AsuraScans
+PAID_RE = re.compile(
+    r"\b(?:lock(?:ed)?|coins?|premium|paywall|early\s*access)\b"
+    r"|asura\+|lucide-lock|fa-lock|🔒|🪙"
+    r"|M16\.5\s*10\.5V6\.75a4\.5\s*4\.5|M12\s*15v2m-6\s*4h12a2\s*2"
+    r"|<rect[^>]+rx=[\"']2[\"'][^>]+>.*?<path[^>]+d=[\"']M7\s+11V7a5\s+5",
+    re.I | re.S,
+)
 OPEN_RE = re.compile(r"[\w-]*(?:unlock|lock[\w-]*open)[\w-]*", re.I)
 EMB_RE = re.compile(r"\{[^{}]*?chapter_(?:name|slug)[^{}]*\}")
 LOCKED_RE = re.compile(
     r"locked chapter|waiting to be unlocked|chapter is locked|login to unlock chapter"
-    r"|cost to unlock|sign in to unlock|unlock this (?:exciting )?chapter", re.I
+    r"|cost to unlock|sign in to unlock|unlock this (?:exciting )?chapter"
+    r"|early access|asura\+|subscribe to read|purchase this chapter|unlock with",
+    re.I,
 )
 
 def norm(s: str) -> str:
@@ -66,6 +76,9 @@ def _chap_anchor(x) -> bool:
 
 def is_paid(tag) -> bool:
     if _paid_text(tag):
+        return True
+    # در AsuraScans اگر داخل تگ لینکِ چپتر یک تگ <svg> کنار اسم چپتر باشد، نشانه قفل است
+    if tag.find("svg") and "asurascans" in str(tag.get("href", "")).lower():
         return True
     row, node = tag, tag.parent
     while node is not None and getattr(node, "name", None) not in (None, "body", "html", "[document]"):
@@ -100,12 +113,19 @@ def chapter_locked(chap_url: str):
         r = requests.get(chap_url, headers=HEADERS, impersonate="chrome124", timeout=15)
         if r.status_code != 200:
             return None
-        return bool(LOCKED_RE.search(BeautifulSoup(r.text, "html.parser").get_text(" ", strip=True)))
+        soup = BeautifulSoup(r.text, "html.parser")
+        page_text = soup.get_text(" ", strip=True)
+        if LOCKED_RE.search(page_text):
+            return True
+        # در صفحه چپتر قفل‌شده‌ی AsuraScans، عکس‌های چپتر لود نمی‌شوند و پیام قفل/اشتراک وسط صفحه است
+        if "asurascans" in chap_url.lower():
+            if re.search(r'"is_locked"\s*:\s*true|"early_access"\s*:\s*true|"is_early_access"\s*:\s*true', r.text, re.I):
+                return True
+        return False
     except Exception:
         return None
 
 def sync_telegram_subscribers() -> set:
-    """دریافت خودکار آیدی تمام کسانی که ربات تلگرام را Start کرده‌اند"""
     subs = set()
     if TG_CHAT_ID:
         for cid in re.split(r"[\s,]+", TG_CHAT_ID):
@@ -149,7 +169,6 @@ def sync_telegram_subscribers() -> set:
                         subs.add(cid)
                         new_users.append(cid)
 
-            # ارسال پیام خوش‌آمدگویی به کسانی که تازه /start زده‌اند
             for cid in new_users:
                 try:
                     requests.post(
@@ -163,7 +182,6 @@ def sync_telegram_subscribers() -> set:
                 except Exception:
                     pass
 
-            # پاک کردن صف آپدیت‌های خوانده‌شده در تلگرام
             if last_update_id is not None:
                 requests.get(
                     f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
@@ -423,6 +441,7 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     paths = [urlparse(resp.url).path.rstrip("/"), urlparse(url).path.rstrip("/")]
     paths = [p for p in dict.fromkeys(paths) if len(p) > 1]
     own_found = False
+    is_asura = "asurascans" in url.lower()
     if paths:
         slugs = set()
         for p in paths:
@@ -461,7 +480,8 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
                 break
             m = CHAPTER_RE.search(text or "")
             if m:
-                cands.append(((float(m.group(1)), 0), m.group(1), href, is_paid(a)))
+                paid_flag = is_paid(a) or (is_asura and bool(a.find("svg")))
+                cands.append(((float(m.group(1)), 0), m.group(1), href, paid_flag))
                 break
 
     if free_only and any(not c[3] for c in cands):
