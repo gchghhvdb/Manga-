@@ -168,14 +168,6 @@
     "last_link": "https://vortexscans.org/series/the-shepherd-wizard/chapter-42"
   },
   {
-    "title": "guide2",
-    "url": "https://valirscans.org/series/comic/the-guide",
-    "selector": "",
-    "include_paid": false,
-    "last_chapter": "24",
-    "last_link": "https://valirscans.org/series/comic/the-guide/chapter/24"
-  },
-  {
     "title": "merry bad ending",
     "url": "https://templetoons.com/comic/strategy-guide-for-a-merry-bad-ending",
     "selector": "",
@@ -238,5 +230,12 @@
     "include_paid": false,
     "last_chapter": "43",
     "last_link": "https://valirscans.org/series/comic/obsessive-love-kills-the-saintess-twice/chapter/43"
+  },
+  {
+    "title": "The Guide",
+    "url": "https://asterscans.com/manga/the-guide/",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
