@@ -125,6 +125,105 @@ def chapter_locked(chap_url: str):
     except Exception:
         return None
 
+def camoufox_latest(url: str, free_only: bool = True):
+    """پشتیبان ضد کلودفلر با مرورگر Camoufox (فقط برای سایت‌هایی مثل LuaComic که 403 می‌دهند)"""
+    try:
+        from camoufox.sync_api import Camoufox
+    except ImportError:
+        print("Camoufox نصب نیست؛ در ورک‌فلو نصب شود.")
+        return None
+
+    print(f"[*] 🦊 فعال‌سازی Camoufox برای عبور از کلودفلر: {url}")
+    captured_chapters = []
+
+    def handle_response(response):
+        try:
+            if "api." in response.url or "chapter" in response.url or "series" in response.url:
+                if "json" in (response.headers.get("content-type") or ""):
+                    data = response.json()
+                    rows = []
+                    if isinstance(data, dict):
+                        rows = data.get("data") or data.get("chapters") or []
+                        for s in (data.get("seasons") or []):
+                            if isinstance(s, dict) and s.get("chapters"):
+                                rows.extend(s.get("chapters"))
+                    elif isinstance(data, list):
+                        rows = data
+                    for r in rows:
+                        if isinstance(r, dict) and ("chapter_name" in r or "chapter_slug" in r):
+                            captured_chapters.append(r)
+        except Exception:
+            pass
+
+    try:
+        with Camoufox(headless=True, humanize=True) as browser:
+            page = browser.new_page()
+            page.on("response", handle_response)
+            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+            for _ in range(8):
+                page.wait_for_timeout(3000)
+                title = page.title()
+                content = page.content()
+                if "just a moment" not in title.lower() and re.search(r"chapter\s*\d+", content, re.I):
+                    break
+                try:
+                    for frame in page.frames:
+                        if "cloudflare" in frame.url or "turnstile" in frame.url:
+                            box = frame.locator("input[type='checkbox'], body").first
+                            if box:
+                                box.click(timeout=1500)
+                except Exception:
+                    pass
+
+            html = page.content()
+
+        # ۱. اگر از API داخلی سایت شکار شده باشد (مثل LuaComic)
+        if captured_chapters:
+            p = urlparse(url)
+            slug = p.path.rstrip("/").split("/")[-1]
+            best = None
+            for ch in captured_chapters:
+                if free_only and _paid_row(ch):
+                    continue
+                name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
+                mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
+                if not mm:
+                    continue
+                label = mm.group(1) if mm.lastindex else mm.group(0)
+                if best is None or float(label) > best[0]:
+                    best = (float(label), label, ch.get("chapter_slug", "") or "")
+            if best:
+                link = f"{p.scheme}://{p.netloc}/series/{slug}/{best[2]}" if best[2] else url
+                return best[1], link
+
+        # ۲. استخراج از HTML رندرشده توسط Camoufox
+        raw = norm(html)
+        soup = BeautifulSoup(raw, "html.parser")
+        slug = urlparse(url).path.rstrip("/").split("/")[-1].lower()
+        cands = []
+        for a in soup.find_all("a"):
+            href = a.get("href", "") or ""
+            if slug and len(slug) >= 4 and slug not in href.lower() and "chapter" not in href.lower():
+                continue
+            row_text = norm(a.get_text(" ", strip=True) + " " + (a.parent.get_text(" ", strip=True) if a.parent else ""))
+            m = CHAPTER_RE.search(row_text) or CHAPTER_RE.search(href)
+            if not m:
+                continue
+            ch_num = m.group(1)
+            row_html = str(a) + " " + (str(a.parent) if a.parent else "")
+            paid_flag = is_paid(a) or bool(re.search(r"coin|lock|premium|paywall|🪙|🔒|\b\d+\s*<svg", row_html, re.I))
+            cands.append((float(ch_num), ch_num, fix_chap_url(url, href), paid_flag))
+
+        if cands:
+            if free_only and any(not c[3] for c in cands):
+                cands = [c for c in cands if not c[3]]
+            best = max(cands, key=lambda x: x[0])
+            return best[1], best[2]
+    except Exception as e:
+        print(f"Camoufox error ({url}): {e}")
+    return None
+
 def naver_webtoon_latest(url: str, free_only: bool = True):
     """پشتیبانی اختصاصی از سایت کره‌ای Naver Webtoon (comic.naver.com / m.comic.naver.com)"""
     if "comic.naver.com" not in url.lower():
@@ -584,8 +683,16 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
         if hc:
             return hc[0], hc[1]
 
-    resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
+        resp.raise_for_status()
+    except Exception as e:
+        # اگر سایت خطای 403 کلودفلر داد، به صورت خودکار با Camoufox باز کن
+        cf = camoufox_latest(url, free_only=free_only)
+        if cf:
+            return cf[0], cf[1]
+        raise e
+
     raw = norm(resp.text)
     soup = BeautifulSoup(raw, "html.parser")
 
@@ -689,6 +796,10 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
             return emb, url
 
     if not cands:
+        # اگر صفحه با جاوااسکریپت/کلودفلر خالی بود، با Camoufox امتحان کن
+        cf = camoufox_latest(url, free_only=free_only)
+        if cf:
+            return cf[0], cf[1]
         raise ValueError("چپتری پیدا نشد")
 
     best = max(cands, key=lambda x: x[0])
