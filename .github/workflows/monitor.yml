@@ -21,10 +21,13 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 curl_cffi
+        run: |
+          pip install requests beautifulsoup4 curl_cffi "camoufox[geoip]" playwright
+          python -m camoufox fetch
 
       - name: Run monitor script
         env:
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
