@@ -522,6 +522,10 @@ def embedded_chapters(raw: str, free_only: bool):
     return best[max(best)] if len(best) >= 2 else None
 
 def notify(title: str, message: str, link: str = "", tg_subs: set = None) -> bool:
+    if os.environ.get("NOTIFICATIONS_ENABLED", "true").strip().lower() in ("false", "0", "no", "off"):
+        print("[*] نوتیفیکیشن‌ها غیرفعال هستند.")
+        return False
+
     ok = False
     if NTFY_TOPIC:
         payload = {
