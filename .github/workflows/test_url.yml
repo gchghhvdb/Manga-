@@ -21,14 +21,6 @@ on:
 jobs:
   test-scraper:
     runs-on: ubuntu-latest
-    services:
-      flaresolverr:
-        image: ghcr.io/flaresolverr/flaresolverr:latest
-        ports:
-          - 8191:8191
-        env:
-          LOG_LEVEL: info
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,8 +30,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests beautifulsoup4 curl_cffi
+      - name: Install dependencies & Camoufox
+        run: |
+          pip install requests beautifulsoup4 curl_cffi "camoufox[geoip]" playwright
+          python -m camoufox fetch
 
       - name: Run Test
         run: python test_scraper.py "${{ inputs.url }}" "${{ inputs.include_paid }}" "${{ inputs.selector }}"
