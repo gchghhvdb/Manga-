@@ -28,6 +28,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NOTIFICATIONS_ENABLED: ${{ secrets.NOTIFICATIONS_ENABLED }}
         run: python cloud_monitor.py
 
       - name: Save updated chapters
