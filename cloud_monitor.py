@@ -127,7 +127,7 @@ def chapter_locked(chap_url: str):
 
 
 # ==============================================================================
-# موتور مستقل ضد کلودفلر (کپیِ مستقیم از کد تست بدون هیچ وابستگی به فایل تست)
+# موتور مستقل ضد کلودفلر (مجهز به Camoufox بومی لینوکس بدون وابستگی به فایل تست)
 # ==============================================================================
 def parse_anti_cf_content(content: str, base_url: str, include_paid: bool = False):
     free_only = not include_paid
@@ -203,7 +203,7 @@ def fetch_via_camoufox(url: str, free_only: bool = True):
         except Exception:
             pass
 
-    with Camoufox(headless=True, humanize=True) as browser:
+    with Camoufox(headless=True, os="linux", humanize=True) as browser:
         page = browser.new_page()
         page.on("response", handle_response)
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
@@ -697,6 +697,13 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
     free_only = not include_paid
 
     if not selector.strip():
+        # اگر سایت کلودفلر سنگین مثل luacomic دارد، اول آی‌پی را با درخواست معمولی نسوزان؛ مستقیم با Camoufox باز کن
+        if "luacomic." in url.lower():
+            cf = camoufox_latest(url, free_only=free_only)
+            if cf:
+                return cf[0], cf[1]
+            raise ValueError("Camoufox نتوانست در این راند کلودفلر luacomic را رد کند (احتمالاً آی‌پی فعلی گیت‌هاب مسدود است)")
+
         # ۰. بررسی اختصاصی Naver Webtoon
         nv = naver_webtoon_latest(url, free_only=free_only)
         if nv:
