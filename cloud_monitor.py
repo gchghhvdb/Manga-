@@ -3,8 +3,6 @@
 import json
 import os
 import re
-import sys
-import subprocess
 import unicodedata
 from urllib.parse import urljoin, urlparse
 from curl_cffi import requests
@@ -127,123 +125,138 @@ def chapter_locked(chap_url: str):
     except Exception:
         return None
 
-def camoufox_latest(url: str, free_only: bool = True):
-    """اجرای ایزوله Camoufox دقیقاً مشابه test_scraper.py که در سندباکس جواب داد"""
-    print(f"[*] 🦊 فعال‌سازی Camoufox برای عبور از کلودفلر: {url}")
-    code = r'''
-import sys, re, json
-from urllib.parse import urlparse
-from bs4 import BeautifulSoup
-from camoufox.sync_api import Camoufox
-from cloud_monitor import CHAPTER_RE, is_paid, norm, fix_chap_url, _paid_row
 
-url = sys.argv[1]
-free_only = sys.argv[2] == "1"
-captured_chapters = []
+# ==============================================================================
+# موتور مستقل ضد کلودفلر (کپیِ مستقیم از کد تست بدون هیچ وابستگی به فایل تست)
+# ==============================================================================
+def parse_anti_cf_content(content: str, base_url: str, include_paid: bool = False):
+    free_only = not include_paid
+    raw = norm(content)
+    soup = BeautifulSoup(raw, "html.parser")
 
-def handle_response(response):
-    try:
-        if "api." in response.url or "chapter" in response.url or "series" in response.url:
-            if "json" in (response.headers.get("content-type") or ""):
-                data = response.json()
-                rows = []
-                if isinstance(data, dict):
-                    rows = data.get("data") or data.get("chapters") or []
-                    for s in (data.get("seasons") or []):
-                        if isinstance(s, dict) and s.get("chapters"):
-                            rows.extend(s.get("chapters"))
-                elif isinstance(data, list):
-                    rows = data
-                for r in rows:
-                    if isinstance(r, dict) and ("chapter_name" in r or "chapter_slug" in r):
-                        captured_chapters.append(r)
-    except Exception:
-        pass
+    slug = urlparse(base_url).path.rstrip("/").split("/")[-1].lower()
+    cands = []
 
-with Camoufox(headless=True, humanize=True) as browser:
-    page = browser.new_page()
-    page.on("response", handle_response)
-    page.goto(url, wait_until="domcontentloaded", timeout=45000)
-    for _ in range(8):
-        page.wait_for_timeout(3000)
-        title = page.title()
-        content = page.content()
-        if "just a moment" not in title.lower() and re.search(r"chapter\s*\d+", content, re.I):
-            break
-        try:
-            for frame in page.frames:
-                if "cloudflare" in frame.url or "turnstile" in frame.url:
-                    box = frame.locator("input[type='checkbox'], body").first
-                    if box:
-                        box.click(timeout=1500)
-        except Exception:
-            pass
-    html = page.content()
-
-if captured_chapters:
-    p = urlparse(url)
-    slug = p.path.rstrip("/").split("/")[-1]
-    best = None
-    for ch in captured_chapters:
-        if free_only and _paid_row(ch):
+    for a in soup.find_all("a"):
+        href = a.get("href", "") or ""
+        if slug and len(slug) >= 4 and slug not in href.lower() and "chapter" not in href.lower():
             continue
-        name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
-        mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
-        if not mm:
+        row_text = norm(a.get_text(" ", strip=True) + " " + (a.parent.get_text(" ", strip=True) if a.parent else ""))
+        m = CHAPTER_RE.search(row_text) or CHAPTER_RE.search(href)
+        if not m:
             continue
-        label = mm.group(1) if mm.lastindex else mm.group(0)
-        if best is None or float(label) > best[0]:
-            best = (float(label), label, ch.get("chapter_slug", "") or "")
-    if best:
-        link = f"{p.scheme}://{p.netloc}/series/{slug}/{best[2]}" if best[2] else url
-        print("RESULT_JSON:" + json.dumps([best[1], link]))
-        sys.exit(0)
+        ch_num = m.group(1)
 
-raw = norm(html)
-soup = BeautifulSoup(raw, "html.parser")
-slug = urlparse(url).path.rstrip("/").split("/")[-1].lower()
-cands = []
-for a in soup.find_all("a"):
-    href = a.get("href", "") or ""
-    if slug and len(slug) >= 4 and slug not in href.lower() and "chapter" not in href.lower():
-        continue
-    row_text = norm(a.get_text(" ", strip=True) + " " + (a.parent.get_text(" ", strip=True) if a.parent else ""))
-    m = CHAPTER_RE.search(row_text) or CHAPTER_RE.search(href)
-    if not m:
-        continue
-    ch_num = m.group(1)
-    row_html = str(a) + " " + (str(a.parent) if a.parent else "")
-    paid_flag = is_paid(a) or bool(re.search(r"coin|lock|premium|paywall|🪙|🔒|\b\d+\s*<svg", row_html, re.I))
-    cands.append((float(ch_num), ch_num, fix_chap_url(url, href), paid_flag))
+        row_html = str(a) + " " + (str(a.parent) if a.parent else "")
+        paid_flag = is_paid(a) or bool(
+            re.search(r"coin|lock|premium|paywall|🪙|🔒|\b\d+\s*<svg", row_html, re.I)
+        )
+        cands.append((float(ch_num), ch_num, fix_chap_url(base_url, href), paid_flag))
 
-if cands:
+    if not cands:
+        for line in raw.splitlines():
+            m = CHAPTER_RE.search(line)
+            if m:
+                ch_num = m.group(1)
+                after_chap = line[m.end():].strip()
+                paid_flag = bool(
+                    re.search(r"^(?:\d{1,3}\b(?!\s*(?:days?|hours?|mins?|seconds?|ago|/)))|coin|lock|🪙|🔒", after_chap, re.I)
+                )
+                m_url = re.search(r"\((https?://[^\s\)]+)\)", line)
+                ch_link = m_url.group(1) if m_url else f"{base_url.rstrip('/')}/chapter-{ch_num}"
+                cands.append((float(ch_num), ch_num, ch_link, paid_flag))
+
+    if not cands:
+        preview = soup.get_text(" ", strip=True)[:200]
+        raise ValueError(f"چپتری در صفحه پیدا نشد. (محتوای دریافتی: {preview})")
+
     if free_only and any(not c[3] for c in cands):
         cands = [c for c in cands if not c[3]]
-    best = max(cands, key=lambda x: x[0])
-    print("RESULT_JSON:" + json.dumps([best[1], best[2]]))
-    sys.exit(0)
 
-sys.exit(1)
-'''
-    for attempt in (1, 2):
+    best = max(cands, key=lambda x: x[0])
+    return best[1], best[2]
+
+
+def fetch_via_camoufox(url: str, free_only: bool = True):
+    """باز کردن سایت با مرورگر ضد کلودفلر Camoufox و شنود مستقیم API چپترها"""
+    print(f"[*] 🦊 باز کردن سایت با مرورگر ضد کلودفلر Camoufox: {url}")
+    from camoufox.sync_api import Camoufox
+
+    captured_chapters = []
+
+    def handle_response(response):
         try:
-            proc = subprocess.run(
-                [sys.executable, "-c", code, url, "1" if free_only else "0"],
-                capture_output=True,
-                text=True,
-                timeout=90,
-            )
-            for line in (proc.stdout or "").splitlines():
-                if line.startswith("RESULT_JSON:"):
-                    res = json.loads(line.split("RESULT_JSON:", 1)[1])
-                    print(f"[*] ✅ Camoufox موفق شد: چپتر {res[0]}")
-                    return res[0], res[1]
-            err_msg = (proc.stderr or "").strip().splitlines()
-            if err_msg:
-                print(f"  ⚠️ تلاش {attempt} با Camoufox ناتمام ماند: {err_msg[-1]}")
-        except Exception as e:
-            print(f"  ⚠️ خطای اجرای Camoufox (تلاش {attempt}): {e}")
-    return None
+            if "api." in response.url or "chapter" in response.url or "series" in response.url:
+                if "json" in (response.headers.get("content-type") or ""):
+                    data = response.json()
+                    rows = []
+                    if isinstance(data, dict):
+                        rows = data.get("data") or data.get("chapters") or []
+                        for s in (data.get("seasons") or []):
+                            if isinstance(s, dict) and s.get("chapters"):
+                                rows.extend(s.get("chapters"))
+                    elif isinstance(data, list):
+                        rows = data
+                    for r in rows:
+                        if isinstance(r, dict) and ("chapter_name" in r or "chapter_slug" in r):
+                            captured_chapters.append(r)
+        except Exception:
+            pass
+
+    with Camoufox(headless=True, humanize=True) as browser:
+        page = browser.new_page()
+        page.on("response", handle_response)
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
+
+        for i in range(8):
+            page.wait_for_timeout(3000)
+            title = page.title()
+            content = page.content()
+            if "just a moment" not in title.lower() and re.search(r"chapter\s*\d+", content, re.I):
+                break
+            try:
+                for frame in page.frames:
+                    if "cloudflare" in frame.url or "turnstile" in frame.url:
+                        box = frame.locator("input[type='checkbox'], body").first
+                        if box:
+                            box.click(timeout=1500)
+            except Exception:
+                pass
+
+        html = page.content()
+        title = page.title()
+        print(f"  📄 عنوان صفحه باز شده: {title}")
+
+    if captured_chapters:
+        print(f"  🎯 تعداد {len(captured_chapters)} چپتر مستقیماً از API داخلی سایت شکار شد!")
+        p = urlparse(url)
+        slug = p.path.rstrip("/").split("/")[-1]
+        best = None
+        for ch in captured_chapters:
+            if free_only and _paid_row(ch):
+                continue
+            name = f"{ch.get('chapter_name', '')} {ch.get('chapter_slug', '')}"
+            mm = CHAPTER_RE.search(name) or re.search(r"\d+(?:\.\d+)?", name)
+            if not mm:
+                continue
+            label = mm.group(1) if mm.lastindex else mm.group(0)
+            if best is None or float(label) > best[0]:
+                best = (float(label), label, ch.get("chapter_slug", "") or "")
+        if best:
+            link = f"{p.scheme}://{p.netloc}/series/{slug}/{best[2]}" if best[2] else url
+            return best[1], link
+
+    return parse_anti_cf_content(html, url, include_paid=not free_only)
+
+
+def camoufox_latest(url: str, free_only: bool = True):
+    try:
+        return fetch_via_camoufox(url, free_only=free_only)
+    except Exception as e:
+        print(f"Camoufox error ({url}): {e}")
+        return None
+# ==============================================================================
+
 
 def naver_webtoon_latest(url: str, free_only: bool = True):
     """پشتیبانی اختصاصی از سایت کره‌ای Naver Webtoon (comic.naver.com / m.comic.naver.com)"""
