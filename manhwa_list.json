@@ -232,19 +232,18 @@
     "last_link": "https://asterscans.com/the-guide-chapter-23/"
   },
   {
-    "title": "Obsessive Love",
-    "url": "https://luacomic.org/series/obsessive-love-kills-the-saintess-twice",
-    "selector": "",
-    "include_paid": false,
-    "last_chapter": "43",
-    "last_link": "https://luacomic.org/series/obsessive-love-kills-the-saintess-twice/chapter-43"
-  },
-  {
     "title": "REDO OF HEALER ترجمه",
     "url": "https://mangafire.to/title/kw7y4-redo-of-healer",
     "selector": "",
     "include_paid": false,
     "last_chapter": "81.2",
     "last_link": "https://mangafire.to/title/kw7y4-redo-of-healer/chapter/9545638"
+  },
+  {
+    "title": " Obsessive Love",
+    "url": "https://comicasura.net/manga/obsessive-love-kills-the-saintess-twice",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
