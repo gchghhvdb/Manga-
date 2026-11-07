@@ -258,115 +258,78 @@ def camoufox_latest(url: str, free_only: bool = True):
 # ==============================================================================
 
 
-def roliascans_latest(url: str):
-    """پشتیبانی اختصاصی و ایزوله از سایت roliascans.com (بدون تداخل با سایر سایت‌ها)"""
-    if "roliascan." not in url.lower():
+def manhuaus_latest(url: str, free_only: bool = True):
+    """پشتیبانی اختصاصی و ایزوله از سایت manhuaus.com (مبتنی بر قالب Madara بدون تداخل با سایر سایت‌ها)"""
+    if "manhuaus." not in url.lower():
         return None
+
+    slug = urlparse(url).path.rstrip("/").split("/")[-1].lower()
+    cands = []
+
+    # ۱. استخراج از طریق درخواست مستقیم AJAX چپترها در قالب Madara
     try:
-        r = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
-        if r.status_code == 200:
-            raw = norm(r.text)
-            soup = BeautifulSoup(raw, "html.parser")
-            cands = []
-
-            # ۱. بررسی درخواست POST /ajax/chapters/
-            try:
-                ajax_u = url.rstrip("/") + "/ajax/chapters/"
-                ra = requests.post(
-                    ajax_u,
-                    headers={**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": url},
-                    impersonate="chrome124",
-                    timeout=12,
-                )
-                if ra.status_code == 200 and len(ra.text) > 40:
-                    asoup = BeautifulSoup(norm(ra.text), "html.parser")
-                    for a in asoup.find_all("a"):
-                        href = a.get("href", "") or ""
-                        txt = norm(a.get_text(" ", strip=True) + " " + href)
-                        m = CHAPTER_RE.search(txt)
-                        if m:
-                            cands.append((float(m.group(1)), m.group(1), urljoin(url, href)))
-            except Exception:
-                pass
-
-            # ۲. بررسی دکمه "Continue / 80" در بالای صفحه RoliaScan
-            for el in soup.find_all(["a", "button", "span", "div"]):
-                txt = norm(el.get_text(" ", strip=True))
-                m_cont = re.search(r"continue\s*/\s*(\d+(?:\.\d+)?)", txt, re.I)
-                if m_cont:
-                    ch_str = m_cont.group(1)
-                    href = el.get("href", "") if el.name == "a" else ""
-                    if not href:
-                        parent_a = el.find_parent("a") or el.find("a")
-                        if parent_a:
-                            href = parent_a.get("href", "")
-                    cands.append((float(ch_str), ch_str, urljoin(url, href) if href else url))
-
-            # ۳. بررسی داده‌های JSON داخل اسکریپت‌های صفحه
-            for m_json in re.finditer(
-                r'(?:"chapter(?:_number|Number|_name|Slug|_slug)?"|\\"chapter(?:_number|Number|_name|Slug|_slug)?\\")\s*:\s*\\?"?(?:ch(?:apter)?[\s.\-_]*)?(\d{1,4}(?:\.\d+)?)',
-                raw,
-                re.I,
-            ):
-                ch_str = m_json.group(1)
-                cands.append((float(ch_str), ch_str, url))
-
-            # ۴. بررسی لینک‌های چپتر داخل صفحه
-            for a in soup.find_all("a"):
+        ajax_url = url.rstrip("/") + "/ajax/chapters/"
+        r_ajax = requests.post(
+            ajax_url,
+            headers={**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": url},
+            impersonate="chrome124",
+            timeout=15,
+        )
+        if r_ajax.status_code == 200 and len(r_ajax.text) > 30:
+            soup_ajax = BeautifulSoup(norm(r_ajax.text), "html.parser")
+            for a in soup_ajax.select("li.wp-manga-chapter a, a"):
                 href = a.get("href", "") or ""
+                if slug and len(slug) >= 3 and slug not in href.lower():
+                    continue
                 txt = norm(a.get_text(" ", strip=True) + " " + href)
                 m = CHAPTER_RE.search(txt)
                 if m:
-                    cands.append((float(m.group(1)), m.group(1), urljoin(url, href)))
-
-            if cands:
-                best = max(cands, key=lambda x: x[0])
-                if best[0] > 1:
-                    return best[1], best[2]
+                    ch_str = m.group(1)
+                    cands.append((float(ch_str), ch_str, fix_chap_url(url, href), is_paid(a)))
     except Exception as e:
-        print(f"RoliaScan HTML info: {e}")
+        print(f"ManhuaUS AJAX info: {e}")
 
-    # ۵. باز کردن صفحه و تب Chapters با مرورگر اگر چپترها با جاوااسکریپت لود شوند
-    try:
-        from camoufox.sync_api import Camoufox
-        captured = []
+    # ۲. استخراج از صفحه اصلی مانگا (فقط از باکس چپترهای خود مانگا، نه سایدبار)
+    if not cands:
+        try:
+            r = requests.get(url, headers=HEADERS, impersonate="chrome124", timeout=TIMEOUT)
+            if r.status_code == 200:
+                soup = BeautifulSoup(norm(r.text), "html.parser")
 
-        def on_resp(response):
-            try:
-                if "json" in (response.headers.get("content-type") or "").lower():
-                    txt = response.text()
-                    for m in CHAPTER_RE.finditer(txt):
-                        captured.append((float(m.group(1)), m.group(1)))
-                    for m in re.finditer(r'"(?:number|chapter|chap)"\s*:\s*"?(\d{1,4}(?:\.\d+)?)"?', txt, re.I):
-                        captured.append((float(m.group(1)), m.group(1)))
-            except Exception:
-                pass
+                # اگر post_id در صفحه بود و لیست با wp-admin/admin-ajax.php لود می‌شد
+                if not soup.select("li.wp-manga-chapter a"):
+                    holder = soup.select_one("div#manga-chapters-holder[data-id], input.rating-post-id")
+                    post_id = (holder.get("data-id") or holder.get("value") or "").strip() if holder else ""
+                    if post_id:
+                        p = urlparse(url)
+                        wp_ajax = f"{p.scheme}://{p.netloc}/wp-admin/admin-ajax.php"
+                        r_wp = requests.post(
+                            wp_ajax,
+                            data={"action": "manga_get_chapters", "manga": post_id},
+                            headers={**HEADERS, "X-Requested-With": "XMLHttpRequest", "Referer": url},
+                            impersonate="chrome124",
+                            timeout=15,
+                        )
+                        if r_wp.status_code == 200 and len(r_wp.text) > 30:
+                            soup = BeautifulSoup(norm(r_wp.text), "html.parser")
 
-        with Camoufox(headless=True, os="linux", humanize=True) as browser:
-            page = browser.new_page()
-            page.on("response", on_resp)
-            page.goto(url, wait_until="domcontentloaded", timeout=40000)
-            page.wait_for_timeout(3000)
-            try:
-                tab = page.get_by_text("Chapters", exact=True).first
-                if tab:
-                    tab.click(timeout=3000)
-                    page.wait_for_timeout(2500)
-            except Exception:
-                pass
-            html = norm(page.content())
+                for a in soup.select("li.wp-manga-chapter a, div.listing-chapters_wrap a, ul.main.version-chap a"):
+                    href = a.get("href", "") or ""
+                    if slug and len(slug) >= 3 and slug not in href.lower():
+                        continue
+                    txt = norm(a.get_text(" ", strip=True) + " " + href)
+                    m = CHAPTER_RE.search(txt)
+                    if m:
+                        ch_str = m.group(1)
+                        cands.append((float(ch_str), ch_str, fix_chap_url(url, href), is_paid(a)))
+        except Exception as e:
+            print(f"ManhuaUS HTML info: {e}")
 
-        cands = [(val, lbl, url) for val, lbl in captured]
-        for m in re.finditer(r"Continue\s*/\s*(\d+(?:\.\d+)?)", html, re.I):
-            cands.append((float(m.group(1)), m.group(1), url))
-        for m in CHAPTER_RE.finditer(BeautifulSoup(html, "html.parser").get_text(" ", strip=True)):
-            cands.append((float(m.group(1)), m.group(1), url))
-
-        if cands:
-            best = max(cands, key=lambda x: x[0])
-            return best[1], best[2]
-    except Exception as e:
-        print(f"RoliaScan Camoufox info: {e}")
+    if cands:
+        if free_only and any(not c[3] for c in cands):
+            cands = [c for c in cands if not c[3]]
+        best = max(cands, key=lambda x: x[0])
+        return best[1], best[2]
 
     return None
 
@@ -817,10 +780,10 @@ def get_latest(url: str, selector: str = "", include_paid: bool = False):
                 return cf[0], cf[1]
             raise ValueError("Camoufox نتوانست در این راند کلودفلر luacomic را رد کند (احتمالاً آی‌پی فعلی گیت‌هاب مسدود است)")
 
-        # بررسی اختصاصی RoliaScan (فقط برای دامنه roliascan.com)
-        rl = roliascans_latest(url)
-        if rl:
-            return rl[0], rl[1]
+        # بررسی اختصاصی ManhuaUS (فقط برای دامنه manhuaus.com)
+        mu = manhuaus_latest(url, free_only=free_only)
+        if mu:
+            return mu[0], mu[1]
 
         # ۰. بررسی اختصاصی Naver Webtoon
         nv = naver_webtoon_latest(url, free_only=free_only)
