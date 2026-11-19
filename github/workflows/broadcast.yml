@@ -1,0 +1,26 @@
+name: Broadcast Message
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: 'متن پیام'
+        required: true
+        default: '🔧 ربات در دست تعمیر است'
+        type: string
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install curl_cffi
+      - name: Send
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MSG: ${{ inputs.message }}
+        run: python broadcast.py "$MSG"
