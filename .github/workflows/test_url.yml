@@ -30,10 +30,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies & Camoufox
+      - name: Install dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install requests beautifulsoup4 curl_cffi "camoufox[geoip]" playwright
-          python -m camoufox fetch
+          python -m camoufox fetch || (python -m camoufox set jwriter20/stable && python -m camoufox fetch) || (python -m camoufox set jwriter20/prerelease && python -m camoufox fetch) || true
+          
 
       - name: Run Test
         run: python test_scraper.py "${{ inputs.url }}" "${{ inputs.include_paid }}" "${{ inputs.selector }}"
