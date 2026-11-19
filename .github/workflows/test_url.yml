@@ -35,10 +35,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           pip install requests beautifulsoup4 curl_cffi "camoufox[geoip]" playwright
-          python -m camoufox fetch || \
-          (python -m camoufox set jwriter20/stable && python -m camoufox fetch) || \
-          (python -m camoufox set jwriter20/prerelease && python -m camoufox fetch) || \
-          true
+          python -m camoufox --help
+          python -m camoufox fetch --help
+          
           
 
       - name: Run Test
