@@ -30,7 +30,6 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-
       - name: Install Python packages
         run: pip install requests beautifulsoup4 curl_cffi "camoufox[geoip]" playwright
 
@@ -43,3 +42,18 @@ jobs:
 
       - name: Fetch Camoufox browser
         if: steps.cf-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for i in 1 2 3 4; do
+            python -m camoufox fetch && break
+            echo "retry $i"; sleep $((i*30))
+          done
+
+      - name: Run Test
+        env:
+          IN_URL: ${{ inputs.url }}
+          IN_PAID: ${{ inputs.include_paid }}
+          IN_SEL: ${{ inputs.selector }}
+        run: python test_scraper.py "$IN_URL" "$IN_PAID" "$IN_SEL"
