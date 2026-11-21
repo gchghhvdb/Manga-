@@ -6,7 +6,7 @@ on:
       message:
         description: 'متن پیام'
         required: true
-        default: '🔧 ربات در دست تعمیر است'
+        default: 'ربات فعاله ✅'
         type: string
 
 jobs:
