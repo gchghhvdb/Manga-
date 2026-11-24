@@ -285,5 +285,12 @@
     "selector": "",
     "include_paid": false,
     "last_chapter": ""
+  },
+  {
+    "title": "Reality Quest",
+    "url": "https://m.comic.naver.com/webtoon/list?titleId=783888&page=1&week=thu&sortOrder=DESC",
+    "selector": "",
+    "include_paid": false,
+    "last_chapter": ""
   }
 ]
